@@ -902,3 +902,108 @@ fn dialogs_can_be_moved() {
     let after = h.get_by_label("New Bookmark").rect();
     assert!((after.left_top() - (before.left_top() + (to - from))).length() < 2.0, "{before:?} → {after:?}");
 }
+
+#[path = "../../data/testdata/ogc_api/server.rs"]
+mod ogc_server;
+
+fn wait_for_ogc(h: &mut egui_kittest::Harness<'static, RustGisApp>, ready: impl Fn(&RustGisApp) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        h.step();
+        if ready(h.state()) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "service did not finish: {:?}", h.state().ui.service.as_ref().map(|c| &c.error));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn ogc_landing_connect_and_add_use_fixture_documents() {
+    use ogc_server::{CATALOG, ITEMS, ROOT, Server};
+    let server = Server::fixture();
+    let mut h = harness();
+    h.state_mut().run("ui.language", json!({"code":"en"})).unwrap();
+    h.state_mut().run("project.new", json!(null)).unwrap();
+    h.state_mut().run("ui.addService", json!(null)).unwrap();
+    h.state_mut().dialogs.text = server.root();
+    h.step();
+    h.step();
+    h.get_by_label("Connect").click();
+    wait_for_ogc(&mut h, |app| app.ui.service.as_ref().is_some_and(|c| c.pending.is_none()));
+    let conn = h.state().ui.service.as_ref().unwrap();
+    assert_eq!(conn.error, None);
+    assert_eq!(conn.url, server.root());
+    assert_eq!(h.state().dialogs.text, server.root());
+    assert_eq!(conn.documents.len(), 1);
+    assert_eq!(conn.listing.as_ref().unwrap()["count"], 1);
+    h.step();
+    h.get_by_label("Places");
+    h.get_by_label("Add").click();
+    wait_for_ogc(&mut h, |app| app.session.map().layer_by_name("Places").is_some());
+    let dataset = &h.state().session.map().layer_by_name("Places").unwrap().dataset;
+    assert_eq!(dataset.features.len(), 1);
+    assert_eq!(dataset.features[0].geometry, Some(rustgis_engine::data::Geometry::Point(rustgis_engine::geom::Coord::new(10., 50.))));
+    let name = dataset.fields.iter().position(|f| f.name == "name").unwrap();
+    assert_eq!(dataset.features[0].attrs[name], rustgis_engine::data::Value::Text("Test Place".into()));
+    server.assert_fixture_requests(&[ROOT, CATALOG, ITEMS]);
+}
+
+#[test]
+fn ogc_landing_lists_both_offerings_and_keeps_maps_after_failure() {
+    use ogc_server::{CATALOG, COLLECTIONS, LANDING, ROOT, Route, Server};
+    for fail in [false, true] {
+        let mut landing: serde_json::Value = serde_json::from_str(LANDING).unwrap();
+        landing["links"].as_array_mut().unwrap().push(json!({"rel":"tilesets-map","href":"/map/tiles"}));
+        let mut catalog = Route::new(CATALOG, COLLECTIONS);
+        catalog.delay = std::time::Duration::from_millis(100);
+        if fail {
+            catalog.status = 503;
+        }
+        let server = Server::new(vec![Route::new(ROOT, &landing.to_string()), catalog]);
+        let mut h = harness();
+        h.state_mut().run("ui.language", json!({"code":"en"})).unwrap();
+        h.state_mut().run("project.new", json!(null)).unwrap();
+        h.state_mut().run("ui.addService", json!(null)).unwrap();
+        h.state_mut().run("ui.addService", json!({"url":server.root()})).unwrap();
+        wait_for_ogc(&mut h, |app| app.ui.service.as_ref().is_some_and(|c| c.pending.is_none()));
+        let conn = h.state().ui.service.as_ref().unwrap();
+        let count = if fail { 1 } else { 2 };
+        assert_eq!(conn.listing.as_ref().unwrap()["count"], count);
+        assert_eq!(conn.error.is_some(), fail);
+        h.step();
+        h.get_by_label("Example GIS (map tiles)");
+        if !fail {
+            h.get_by_label("Places");
+        }
+        // The root map remains addable with its own document even after another fetch failed.
+        h.query_all_by_label("Add").next().unwrap().click();
+        wait_for_ogc(&mut h, |app| !app.session.map().tiles.is_empty());
+        assert!(h.state().session.map().tiles[0].url.contains("/map/tiles/"));
+    }
+}
+
+#[test]
+fn ogc_landing_reconnecting_ignores_a_delayed_response() {
+    use ogc_server::{LANDING, ROOT, Route, Server};
+    let mut delayed = Route::new(ROOT, LANDING);
+    delayed.delay = std::time::Duration::from_millis(400);
+    let old = Server::new(vec![delayed]);
+    let current = Server::fixture();
+    let mut h = harness();
+    h.state_mut().run("ui.addService", json!({"url":old.root()})).unwrap();
+    wait_for_ogc(&mut h, |_| !old.requests().is_empty());
+    h.state_mut().run("ui.addService", json!({"url":current.root()})).unwrap();
+    wait_for_ogc(&mut h, |app| app.ui.service.as_ref().is_some_and(|c| c.pending.is_none()));
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < until {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let conn = h.state().ui.service.as_ref().unwrap();
+    assert_eq!(conn.url, current.root());
+    assert_eq!(conn.error, None);
+    assert_eq!(conn.listing.as_ref().unwrap()["layers"][0]["title"], "Places");
+    assert_eq!(old.requests().len(), 1);
+    current.assert_fixture_requests(&[ogc_server::ROOT, ogc_server::CATALOG]);
+}

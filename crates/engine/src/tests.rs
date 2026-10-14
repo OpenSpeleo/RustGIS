@@ -5908,3 +5908,188 @@ fn a_failed_command_reopens_the_layout_open_before_it() {
     assert!(r.is_err());
     assert_eq!(s.active_layout.and_then(|i| s.project.layouts.get(i)).map(|l| l.name.as_str()), Some("A"));
 }
+
+#[path = "../../data/testdata/ogc_api/server.rs"]
+mod ogc_server;
+
+#[test]
+fn ogc_landing_fixture_lists_and_loads_features() {
+    use ogc_server::{CATALOG, ITEMS, ROOT, Server};
+    let server = Server::fixture();
+    let mut session = Session::new(Project::default());
+    let listing = session.run("service.layers", &json!({"url": server.root()})).unwrap();
+    assert_eq!(listing["count"], 1);
+    assert_eq!(listing["layers"][0]["name"], "places");
+    assert_eq!(listing["layers"][0]["source_url"], format!("{}{CATALOG}?f=json&key=fixture-key", server.base));
+    assert_eq!(listing["layers"][0]["offer"]["url"], format!("{}{ITEMS}?key=fixture-key&limit=10000", server.base));
+    assert!(listing.get("next").is_none());
+    let result = session.run("service.add", &json!({"url": server.root(), "layer": "places"})).unwrap();
+    assert_eq!(result["features"], 1);
+    let dataset = &session.map().layer_by_name("Places").unwrap().dataset;
+    assert_eq!(dataset.features.len(), 1);
+    assert_eq!(dataset.features[0].geometry, Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(10., 50.))));
+    let name = dataset.fields.iter().position(|f| f.name == "name").unwrap();
+    assert_eq!(dataset.features[0].attrs[name], rustgis_data::Value::Text("Test Place".into()));
+    server.assert_fixture_requests(&[ROOT, CATALOG, ROOT, CATALOG, ITEMS]);
+}
+
+#[test]
+fn ogc_landing_supplied_documents_never_fetch_capabilities() {
+    use ogc_server::{CATALOG, COLLECTIONS, LANDING, Server};
+    let server = Server::fixture();
+    let mut session = Session::new(Project::default());
+    let mut params = json!({"url":server.root(), "text":LANDING});
+    let initial = session.run("service.layers", &params).unwrap();
+    assert_eq!(initial["count"], 0);
+    let next = initial["next"].as_str().unwrap();
+    assert_eq!(next, format!("{}{CATALOG}?f=json&key=fixture-key", server.base));
+    params["documents"] = json!([{"url":next,"text":COLLECTIONS}]);
+    let complete = session.run("service.layers", &params).unwrap();
+    assert_eq!(complete["count"], 1);
+    assert!(complete.get("next").is_none());
+    assert!(server.requests().is_empty());
+    params["documents"][0]["text"] = json!("{\"collections\":[]}");
+    let empty = session.run("service.layers", &params).unwrap();
+    assert_eq!(empty["count"], 0);
+    assert!(empty.get("next").is_none());
+}
+
+#[test]
+fn ogc_landing_keeps_map_tiles_and_collection_provenance() {
+    use ogc_server::{CATALOG, COLLECTIONS, FEATURES, ITEMS, LANDING, Route, Server};
+    let mut landing: Value = serde_json::from_str(LANDING).unwrap();
+    landing["links"].as_array_mut().unwrap().push(json!({
+        "rel":"tilesets-map", "type":"application/json", "href":"/map/tiles"
+    }));
+    let mut collections: Value = serde_json::from_str(COLLECTIONS).unwrap();
+    // The dataset map and a feature collection can share the id "map".
+    collections["collections"][0]["id"] = json!("map");
+    let server = Server::new(vec![Route::new(ITEMS, FEATURES)]);
+    let root = format!("{}?f=json", server.root());
+    let catalog = format!("{}{CATALOG}?f=json&key=fixture-key", server.base);
+    let mut params = json!({"url":server.root(),"text":landing.to_string(),"documents":[{"url":catalog,"text":collections.to_string()}]});
+    let mut session = Session::new(Project::default());
+    let listing = session.run("service.layers", &params).unwrap();
+    assert_eq!(listing["count"], 2);
+    assert_eq!(listing["kind"], "OGC API Features and Tiles");
+    assert_eq!(listing["layers"][0]["source_url"], root);
+    assert_eq!(listing["layers"][1]["source_url"], catalog);
+    params["layer"] = json!("map");
+    params["source_url"] = json!(root);
+    params["tiles"] = json!(format!("{}/map/tiles/{{z}}/{{x}}/{{y}}.png", server.base));
+    session.run("service.add", &params).unwrap();
+    assert_eq!(session.map().tiles.len(), 1);
+    assert!(session.map().tiles[0].url.contains("/map/tiles/"));
+    params["source_url"] = json!(catalog);
+    session.run("service.add", &params).unwrap();
+    assert_eq!(session.map().layer_by_name("Places").unwrap().dataset.features.len(), 1);
+    server.assert_fixture_requests(&[ITEMS]);
+
+    // A bad collections answer must not discard the landing page's usable map.
+    params["documents"][0]["text"] = json!("not JSON");
+    let partial = session.run("service.layers", &params).unwrap();
+    assert_eq!(partial["count"], 1);
+    assert!(partial.get("next").is_none());
+    assert!(!partial["notes"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
+    let mut session = Session::new(Project::default());
+    let link = |url: &str| json!({"links":[{"rel":"data","type":"application/json","href":url}]}).to_string();
+    let root = "https://example.org/ogc/root";
+    for target in ["http://127.0.0.1/catalog", "http://169.254.169.254/catalog", "file:///etc/passwd"] {
+        let result = session.run("service.layers", &json!({"url":root,"text":link(target)}));
+        assert!(result.is_err(), "{target}");
+    }
+    let error = session.run("service.layers", &json!({"url":root,"text":link(&format!("{root}?f=json"))})).unwrap_err();
+    assert!(error.contains("loop"), "{error}");
+    let docs: Vec<Value> = (1..=3)
+        .map(|n| {
+            json!({
+                "url":format!("https://example.org/ogc/{n}"),
+                "text":link(&format!("https://example.org/ogc/{}",n+1))
+            })
+        })
+        .collect();
+    let error = session.run("service.layers", &json!({"url":root,"text":link("https://example.org/ogc/1"),"documents":docs})).unwrap_err();
+    assert!(error.contains("four documents"), "{error}");
+    let docs = json!([
+        {"url":"https://example.org/ogc/a","text":link("https://example.org/ogc/b")},
+        {"url":"https://example.org/ogc/b","text":link("https://example.org/ogc/a")}
+    ]);
+    assert!(
+        session
+            .run("service.layers", &json!({"url":root,"text":link("https://example.org/ogc/a"),"documents":docs}))
+            .unwrap_err()
+            .contains("loop")
+    );
+    for documents in [json!({}), json!([{}]), json!([{"url":root,"text":23}]), json!([{}, {}, {}, {}])] {
+        assert!(session.run("service.layers", &json!({"url":root,"text":ogc_server::LANDING,"documents":documents})).is_err());
+    }
+    for text in ["{", "{}", "{\"links\":[]}"] {
+        assert!(session.run("service.layers", &json!({"url":root,"text":text})).is_err());
+    }
+}
+
+#[test]
+fn ogc_landing_http_failure_keeps_existing_map_layers() {
+    use ogc_server::{CATALOG, LANDING, ROOT, Route, Server};
+    for with_map in [false, true] {
+        let mut landing: Value = serde_json::from_str(LANDING).unwrap();
+        if with_map {
+            landing["links"].as_array_mut().unwrap().push(json!({"rel":"tilesets-map","href":"/map/tiles"}));
+        }
+        let mut bad = Route::new(CATALOG, "unavailable");
+        bad.status = 503;
+        let server = Server::new(vec![Route::new(ROOT, &landing.to_string()), bad]);
+        let mut session = Session::new(Project::default());
+        let result = session.run("service.layers", &json!({"url":server.root()}));
+        if with_map {
+            let result = result.unwrap();
+            assert_eq!(result["count"], 1);
+            assert!(result.get("next").is_none());
+            assert!(result["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("503")));
+        } else {
+            assert!(result.unwrap_err().contains("503"));
+        }
+        server.assert_fixture_requests(&[ROOT, CATALOG]);
+    }
+}
+
+#[test]
+fn ogc_discovery_preserves_all_offers_within_the_collection_limit() {
+    let collections: Vec<Value> = (0..1001)
+        .map(|i| {
+            json!({
+                "id": format!("collection-{i}"),
+                "links": [
+                    {"rel":"tilesets-map", "href":format!("/tiles/{i}")},
+                    {"rel":"items", "type":"application/geo+json", "href":format!("/items/{i}")}
+                ]
+            })
+        })
+        .collect();
+    let mut session = Session::new(Project::default());
+    let listing = session
+        .run("service.layers", &json!({"url":"https://example.org/collections","text":json!({"collections":collections}).to_string()}))
+        .unwrap();
+    assert_eq!(listing["count"], 2002);
+    assert_eq!(listing["layers"][2001]["name"], "collection-1000");
+    assert_eq!(listing["layers"][2001]["offer"]["type"], "features");
+}
+
+#[test]
+fn ogc_discovery_keeps_features_whose_id_matches_a_generated_tile_name() {
+    let doc = json!({"collections":[
+        {"id":"roads", "links":[{"rel":"tilesets-map","href":"/tiles/roads"}]},
+        {"id":"roads (map tiles)", "links":[{"rel":"items","type":"application/geo+json","href":"/items/other"}]}
+    ]});
+    let mut session = Session::new(Project::default());
+    let listing = session.run("service.layers", &json!({"url":"https://example.org/collections","text":doc.to_string()})).unwrap();
+    assert_eq!(listing["count"], 2);
+    assert_eq!(listing["layers"][0]["name"], listing["layers"][1]["name"]);
+    assert_eq!(listing["layers"][0]["offer"]["type"], "tiles");
+    assert_eq!(listing["layers"][1]["offer"]["type"], "features");
+    assert_eq!(listing["layers"][1]["offer"]["url"], "https://example.org/items/other?limit=10000");
+}

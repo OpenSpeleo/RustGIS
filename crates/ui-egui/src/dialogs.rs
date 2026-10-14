@@ -618,7 +618,8 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         ui.separator();
         if let Some(e) = &conn.error {
             ui.colored_label(t.red, e);
-        } else if let Some(v) = &conn.listing {
+        }
+        if let Some(v) = &conn.listing {
             let kind = v.get("kind").and_then(Value::as_str).unwrap_or("");
             let title = v.get("title").and_then(Value::as_str).unwrap_or("");
             // Borrowed, not cloned: the dialog draws every frame.
@@ -657,10 +658,11 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                     });
                 }
             });
-        } else {
+        }
+        if let Some(pending) = &conn.pending {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(crate::i18n::fmt("Connecting to {url}…", &[("url", &conn.url)]));
+                ui.label(crate::i18n::fmt("Connecting to {url}…", &[("url", pending)]));
             });
         }
     }
@@ -676,7 +678,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         } else if offer.get("type").and_then(Value::as_str) == Some("coverage") {
             // A coverage: its description first, off the frame (poll_describe asks for it).
             let describe = offer.get("describe").and_then(Value::as_str).unwrap_or("").to_string();
-            let mut p = json!({"url": url, "layer": name, "text": text, "name": title});
+            let mut p = json!({"url": url, "layer": name, "text": text, "name": title, "documents": conn.documents});
             if kind != "auto" {
                 p["type"] = json!(kind);
             }
@@ -686,7 +688,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             }
             Ok(tl!("Describing"))
         } else {
-            let mut p = json!({"url": url, "layer": name, "text": text});
+            let mut p = json!({"url": url, "layer": name, "text": text, "documents": conn.documents, "source_url": l.get("source_url")});
             if kind != "auto" {
                 p["type"] = json!(kind);
             }

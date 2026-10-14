@@ -102,7 +102,10 @@ come through the From URL… dialog (`ui.addUrl`) or a `?data=` link. GeoJSON, C
 
 **Home › Add Data › From Service…** connects to a service by its address, lists what it offers from
 its capabilities, and adds a layer at a time (`service.layers` and `service.add` from scripts, the
-command line and MCP).
+command line and MCP). An OGC API landing page works directly: RustGIS follows its advertised
+JSON collections link, so you don't need to append `/collections`. If the landing page also
+offers map tiles, they remain listed alongside the collections. A failed collections request
+leaves any available map layers usable and shows the error.
 
 | Service | What it lists | How a layer is added |
 | --- | --- | --- |
@@ -115,7 +118,8 @@ command line and MCP).
 | ArcGIS REST | FeatureServer and MapServer layers; a MapServer's map; an ImageServer; a VectorTileServer | Layers queried as GeoJSON (up to the server's record limit); a map as its tile cache when it is Web Mercator's pyramid, else exported images; an ImageServer as exported images; a VectorTileServer as its MapLibre style |
 
 The type is guessed from the address (`?SERVICE=`, `/wmts`, `/wfs`, `/wcs`, `/collections`, `/rest/services`…) or
-chosen (an OGC API landing page needs the OGC API type). A WebMercatorQuad tileset is found by its
+chosen (select **OGC API Features and Tiles** when a landing page's address doesn't identify
+its type). A WebMercatorQuad tileset is found by its
 tile matrix set, whatever the server calls it. A service that asks for a token says so. In the web app the server must allow requests
 from web pages (CORS).
 
@@ -123,6 +127,14 @@ A coverage is read once, for the view when it was added (its DescribeCoverage fi
 format and bounds; `service.coverage` gives the GetCoverage address alone). Moving the map doesn't
 ask for it again: add it again for another area. The server reprojects it to EPSG:4326 (WCS 2.0
 through its CRS extension); one that can't answers with an error, which is shown.
+
+For callers that fetch documents themselves (including the web app), `service.layers` accepts
+`text` for the initial document and `documents: [{"url": "…", "text": "…"}]` for subsequent
+responses. It returns `next` while another collections document is needed; supplied documents
+never cause a blocking capabilities fetch. Each listed layer includes `source_url`; pass it
+and the same documents to `service.add` to distinguish layers with the same name. Discovery
+follows at most four documents and rejects loops and disallowed addresses. Feature downloads
+retain their existing limits; this does not add collection-list or feature pagination.
 
 ### Catalogues
 

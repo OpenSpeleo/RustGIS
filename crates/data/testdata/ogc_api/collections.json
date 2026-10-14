@@ -1,0 +1,13 @@
+{
+  "title": "Example GIS",
+  "collections": [
+    {
+      "id": "places",
+      "title": "Places",
+      "extent": {"spatial": {"bbox": [[10, 50, 10, 50]]}},
+      "links": [
+        {"rel": "items", "type": "application/geo+json", "href": "collections/places/items?key=fixture-key"}
+      ]
+    }
+  ]
+}

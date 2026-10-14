@@ -169,6 +169,10 @@ pub struct ServiceConn {
     pub slot: Slot<Result<Vec<u8>, String>>,
     /// The capabilities document, once it has arrived.
     pub text: Option<String>,
+    /// Additional capabilities documents, keyed by their requested address.
+    pub documents: Vec<Value>,
+    /// The capabilities request currently in flight (independent of the entered address).
+    pub pending: Option<String>,
     /// What `service.layers` made of it.
     pub listing: Option<Value>,
     pub error: Option<String>,
@@ -215,6 +219,19 @@ pub enum LayersView {
     DataSource,
     /// Selectable and not selectable layers, with their selected feature counts.
     Selection,
+}
+
+/// Retains the GUI's legacy XML decoding while refusing malformed JSON text.
+fn service_text(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
+    String::from_utf8(bytes).or_else(|error| {
+        let bytes = error.as_bytes();
+        let without_bom = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+        if without_bom.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'<') {
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        } else {
+            Err(error)
+        }
+    })
 }
 
 /// Panes on the left of the map.
@@ -1348,6 +1365,8 @@ impl RustGisApp {
                     kind,
                     slot,
                     text: None,
+                    documents: Vec::new(),
+                    pending: Some(caps),
                     listing: None,
                     error: None,
                     resolving: None,
@@ -2163,29 +2182,38 @@ impl RustGisApp {
         self.poll_describe();
         let Some(conn) = &mut self.ui.service else { return };
         let Some(r) = conn.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        let document = conn.pending.take().unwrap_or_else(|| conn.url.clone());
         match r {
             Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                let mut p = json!({"url": conn.url, "text": text});
+                let text = match service_text(bytes) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        conn.error = Some(tl!("The service's answer isn't UTF-8 text").into());
+                        return;
+                    }
+                };
+                if conn.text.is_none() {
+                    conn.text = Some(text);
+                } else {
+                    conn.documents.push(json!({"url": document, "text": text}));
+                }
+                let mut p = json!({"url": conn.url, "text": conn.text, "documents": conn.documents});
                 if conn.kind != "auto" {
                     p["type"] = json!(conn.kind);
                 }
-                conn.text = Some(text);
                 // Not `self.run`: an error belongs in the dialog, not the notices.
                 match self.session.run("service.layers", &p) {
                     Ok(v) => {
-                        if let Some(c) = &mut self.ui.service {
-                            c.listing = Some(v);
+                        conn.pending = v.get("next").and_then(Value::as_str).map(str::to_string);
+                        if let Some(next) = &conn.pending {
+                            conn.slot = fetch_into(next);
                         }
+                        conn.listing = Some(v);
                     }
-                    Err(e) => {
-                        if let Some(c) = &mut self.ui.service {
-                            c.error = Some(e);
-                        }
-                    }
+                    Err(e) => conn.error = Some(e),
                 }
             }
-            Err(e) => conn.error = Some(if e.starts_with(&conn.url) { e } else { format!("{}: {e}", conn.url) }),
+            Err(e) => conn.error = Some(e),
         }
     }
 
@@ -2390,4 +2418,19 @@ fn project_file_name(url: &str) -> Option<&str> {
     let path = url.split(['?', '#']).next().unwrap_or("");
     let last = path.rsplit('/').next().unwrap_or("");
     (rustgis_engine::project::is_project_file(last) || last.to_ascii_lowercase().ends_with(".rgispkg")).then_some(last)
+}
+
+#[cfg(test)]
+mod service_text_tests {
+    #[test]
+    fn legacy_xml_decoding_does_not_relax_json_utf8() {
+        for bytes in [b" \n<Title>Caf\xe9</Title>".as_slice(), b"\xef\xbb\xbf \n<Title>Caf\xe9</Title>".as_slice()] {
+            assert!(super::service_text(bytes.to_vec()).is_ok_and(|s| s.contains("Caf\u{fffd}")));
+        }
+        for bytes in [b"{\"title\":\"Caf\xe9\"}".as_slice(), b"\xef\xbb\xbf{\"title\":\"Caf\xe9\"}".as_slice()] {
+            assert!(super::service_text(bytes.to_vec()).is_err());
+        }
+        let valid = "{\"title\":\"Café\"}";
+        assert!(super::service_text(valid.as_bytes().to_vec()).is_ok_and(|text| text == valid));
+    }
 }
