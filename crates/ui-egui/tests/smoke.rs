@@ -97,6 +97,105 @@ fn mcp_relay_early_start_wakes_queued_request_and_updates_ui() {
     h.step();
     assert!(h.query_by_label("MCP relay · 0 attached").is_none());
 }
+
+/// Check the actual displayed rows, not just the data that feeds the contents pane.
+fn assert_child_order(h: &mut egui_kittest::Harness<'_, RustGisApp>, labels: &[&str]) {
+    for _ in 0..3 {
+        h.step();
+    }
+    for pair in labels.windows(2) {
+        let before = h.get_by_label(pair[0]).rect();
+        let after = h.get_by_label(pair[1]).rect();
+        assert!(before.max.y <= after.min.y, "{} must precede {}", pair[0], pair[1]);
+    }
+}
+
+#[test]
+fn nested_children_from_kml_kmz_and_categorized_files_are_sorted() {
+    let kml = include_bytes!("../../data/testdata/sorted-children.kml");
+    let kmz = rustgis_engine::data::zip::write(&[("doc.kml".into(), kml.to_vec())]).unwrap();
+    let csv = b"lon,lat,category\n10,50,Zulu\n11,50,alpha\n12,50,Bravo\n";
+    let geojson = serde_json::to_vec(&json!({"type":"FeatureCollection", "features":
+        (["Zulu", "alpha", "Bravo"].map(|name| json!({"type":"Feature", "properties":{"category":name},
+            "geometry":{"type":"Point","coordinates":[10,50]}})))}))
+    .unwrap();
+    for (file, bytes, categorize) in [
+        ("children.kml", kml.as_slice(), false),
+        ("children.kmz", kmz.as_slice(), false),
+        ("children.csv", csv.as_slice(), true),
+        ("children.geojson", geojson.as_slice(), true),
+    ] {
+        let mut h = harness();
+        h.state_mut().run("project.new", json!(null)).unwrap();
+        h.state_mut().open_picked(file, bytes).unwrap();
+        assert_eq!(h.state().session.map().layers.len(), 1, "{file}");
+        let id = h.state().session.map().layers[0].id;
+        if categorize {
+            h.state_mut().run("layer.symbology", json!({"layer":id,"type":"unique","field":"category"})).unwrap();
+        }
+        assert_child_order(&mut h, &["alpha", "Bravo", "Zulu", "<all other values>"]);
+        // Collapsing and reopening uses the same ordering.
+        h.state_mut().run("layer.expand", json!({"layer":id,"on":false})).unwrap();
+        h.step();
+        h.state_mut().run("layer.expand", json!({"layer":id,"on":true})).unwrap();
+        assert_child_order(&mut h, &["alpha", "Bravo", "Zulu", "<all other values>"]);
+    }
+}
+
+#[test]
+fn nested_ogc_children_sort_on_import_rename_refresh_and_reopen() {
+    use ogc_server::{FEATURES, GROUP_COLLECTIONS, LINES};
+    let mut h = harness();
+    h.state_mut().run("project.new", json!(null)).unwrap();
+    // Use supplied fixture documents/responses: no live service or network needed.
+    let params = |app: &mut RustGisApp, names: &[&str]| {
+        let fixture: serde_json::Value = serde_json::from_str(GROUP_COLLECTIONS).unwrap();
+        let collections: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let mut collection = fixture["collections"][i % 2].clone();
+                collection["id"] = json!(format!("child-{i}"));
+                collection["title"] = json!(name);
+                collection["links"][0]["href"] = json!(format!("collections/child-{i}/items"));
+                collection
+            })
+            .collect();
+        let mut p = json!({"url":"https://example.org/collections", "text":json!({"collections":collections}).to_string()});
+        let plan = app.run("service.groupPlan", p.clone()).unwrap();
+        p["responses"] = json!(
+            plan["layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, l)| { json!({"url":l["offer"]["url"],"text":if i % 2 == 0 { FEATURES } else { LINES }}) })
+                .collect::<Vec<_>>()
+        );
+        p
+    };
+    let mut p = params(h.state_mut(), &["Zulu", "alpha", "Bravo", "ALPHA"]);
+    h.state_mut().run("service.import", p.clone()).unwrap();
+    let group = h.state().session.map().service_groups[0].id;
+    let child = h.state().session.map().layer_by_name("Zulu").unwrap().id;
+    let draw_order: Vec<_> = h.state().session.map().layers.iter().map(|l| l.id).collect();
+    assert_child_order(&mut h, &["My OGC Layer", "alpha", "ALPHA (2)", "Bravo", "Zulu"]);
+    assert_eq!(h.state().session.map().layers.iter().map(|l| l.id).collect::<Vec<_>>(), draw_order);
+    h.state_mut().run("layer.rename", json!({"layer":child,"name":"aardvark"})).unwrap();
+    assert_child_order(&mut h, &["aardvark", "alpha", "ALPHA (2)", "Bravo"]);
+    p["layer"] = json!(child);
+    h.state_mut().run("service.refresh", p).unwrap();
+    assert_child_order(&mut h, &["aardvark", "alpha", "ALPHA (2)", "Bravo"]);
+    let mut p = params(h.state_mut(), &["Zulu", "alpha", "Bravo", "ALPHA", "beta"]);
+    p["group"] = json!(group);
+    h.state_mut().run("service.refresh", p).unwrap();
+    assert_child_order(&mut h, &["aardvark", "alpha", "ALPHA (2)", "beta", "Bravo"]);
+    let bytes = serde_json::to_vec(&h.state().session.project).unwrap();
+    h.state_mut().run("project.new", json!(null)).unwrap();
+    h.state_mut().open_picked("children.rgis", &bytes).unwrap();
+    assert_child_order(&mut h, &["My OGC Layer", "aardvark", "alpha", "ALPHA (2)", "beta", "Bravo"]);
+}
+
 #[test]
 fn every_tab_pane_and_dialog_renders() {
     let mut h = harness();
@@ -1018,7 +1117,7 @@ fn ogc_group_context_menus_refresh_all_or_one_child() {
     h.state_mut().run("project.new", json!(null)).unwrap();
     h.state_mut().run("ui.importService", json!({"url":server.root()})).unwrap();
     wait_for_ogc(&mut h, |app| app.ui.service_import.is_none());
-    assert_eq!(h.state().session.map().layers.len(), 2, "{:?}", h.state().dialogs.error);
+    assert_eq!(h.state().session.map().layers.len(), 2, "{:?}; requests: {:?}", h.state().dialogs.error, server.requests());
     let group = h.state().session.map().service_groups[0].id;
     let point = h.state().session.map().layer_by_name("Places").unwrap().id;
     for _ in 0..3 {

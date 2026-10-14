@@ -319,6 +319,7 @@ impl Renderer {
             .filter(|(_, u)| **u)
             .map(|((k, s), _)| LegendEntry { label: k.clone(), symbol: *s, fallback: false })
             .collect();
+        v.sort_by_cached_key(|e| e.label.to_lowercase());
         if other_used {
             v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other, fallback: true });
         }
@@ -331,6 +332,8 @@ impl Renderer {
             Renderer::Unique { classes, other, .. } => {
                 let mut v: Vec<LegendEntry> =
                     classes.iter().map(|(k, s)| LegendEntry { label: k.clone(), symbol: *s, fallback: false }).collect();
+                // Keep symbols attached to their sorted labels and the fallback at the end.
+                v.sort_by_cached_key(|e| e.label.to_lowercase());
                 v.push(LegendEntry { label: OTHER_VALUES.into(), symbol: *other, fallback: true });
                 v
             }
@@ -675,10 +678,47 @@ mod tests {
         let rows = named.legend_for(&d2, &[]);
         assert_eq!(
             rows.iter().map(|e| (e.label.as_str(), e.fallback)).collect::<Vec<_>>(),
-            [("a", false), (OTHER_VALUES, false), (OTHER_VALUES, true)]
+            [(OTHER_VALUES, false), ("a", false), (OTHER_VALUES, true)]
         );
         // Other renderers list their classes as they are.
         assert_eq!(Renderer::Single(s(0)).legend_for(&d, &[false; 4]), Vec::new());
+    }
+
+    #[test]
+    fn categorical_children_sort_case_insensitively_without_changing_symbols() {
+        let names = ["Zulu", "alpha", "Bravo", "ALPHA", "éclair", "École"];
+        let mut data = Dataset::new("categories", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        let classes: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                data.push(None, vec![Value::Text((*name).into())]);
+                ((*name).into(), Symbol::default_for(GeometryType::Point, i as u32))
+            })
+            .collect();
+        let renderer = Renderer::Unique {
+            field: "name".into(),
+            classes: classes.clone(),
+            other: Symbol::default_for(GeometryType::Point, 99),
+            ramp: Ramp::Ember,
+        };
+        let legend = renderer.legend();
+        assert_eq!(
+            legend.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+            ["alpha", "ALPHA", "Bravo", "Zulu", "éclair", "École", "<all other values>"]
+        );
+        for (i, (name, symbol)) in classes.iter().enumerate() {
+            assert_eq!(legend.iter().find(|e| &e.label == name).unwrap().symbol, *symbol);
+            assert_eq!(renderer.symbol_for(&data, i), *symbol);
+        }
+        let filtered = renderer.legend_for(&data, &[true, false, true, true, false, false]);
+        assert_eq!(filtered.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["ALPHA", "Bravo", "Zulu"]);
+        for entry in &filtered {
+            assert_eq!(entry.symbol, classes.iter().find(|(name, _)| name == &entry.label).unwrap().1);
+            assert!(!entry.fallback);
+        }
+        data.push(None, vec![Value::Text("unclassified".into())]);
+        assert_eq!(renderer.legend_for(&data, &[]), legend);
     }
 
     #[test]

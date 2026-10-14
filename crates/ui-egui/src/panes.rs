@@ -695,6 +695,8 @@ fn service_group_row(
 ) {
     let q = filter_query(&app.ui.layer_filter);
     let filtering = !q.is_empty();
+    let mut children: Vec<&Layer> = layers.iter().filter(|l| group.children.iter().any(|c| c.layer == l.id)).collect();
+    children.sort_by_cached_key(|l| (l.name.to_lowercase(), l.id));
     ui.push_id(("service_group", group.id), |ui| {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
@@ -709,7 +711,6 @@ fn service_group_row(
             if arrow.clicked() {
                 let _ = app.run("service.group", json!({"group":group.id,"expanded":!group.expanded}));
             }
-            let children: Vec<&Layer> = layers.iter().filter(|l| group.children.iter().any(|c| c.layer == l.id)).collect();
             let mut visible = !children.is_empty() && children.iter().all(|l| l.visible);
             if ui.checkbox(&mut visible, "").changed() {
                 let _ = app.run("service.group", json!({"group":group.id,"visible":visible}));
@@ -739,12 +740,8 @@ fn service_group_row(
         });
         if group.expanded || filtering {
             ui.indent("children", |ui| {
-                let mut blocks = Vec::new();
-                for layer in layers.iter().filter(|l| group.children.iter().any(|c| c.layer == l.id) && filter_shows(&q, &l.name)) {
-                    blocks.push((layer.id, layer_row(app, ui, layer, scale, !filtering, t)));
-                }
-                if !filtering {
-                    layer_drop(app, ui, &blocks, t);
+                for layer in children.iter().filter(|l| filter_shows(&q, &l.name)) {
+                    layer_row(app, ui, layer, scale, false, t);
                 }
             });
         }
@@ -870,7 +867,7 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
 }
 
 /// A layer's row and, expanded, its legend; returns the rectangle of both. With `reorder` off
-/// (the list is filtered) the row can't be dragged.
+/// (the list is filtered or children are sorted by name) the row can't be dragged.
 fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: bool, t: &Tokens) -> Rect {
     let active = app.session.active_layer == Some(l.id);
     let row_h = 26.0;
@@ -1015,7 +1012,8 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
             ui.label(egui::RichText::new(field).size(11.0).color(t.text_dim));
         });
         for e in l.renderer.legend().iter().take(40) {
-            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+            let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &e.label));
             let pr = Rect::from_center_size(pos2(r.min.x + 84.0, r.center().y), vec2(18.0, 14.0));
             patch(ui.painter(), pr, &e.symbol, l.geometry_type());
             ui.painter().text(pos2(r.min.x + 100.0, r.center().y), Align2::LEFT_CENTER, &e.label, regular(11.5), t.text);

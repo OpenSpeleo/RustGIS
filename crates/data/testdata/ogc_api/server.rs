@@ -88,6 +88,9 @@ impl Server {
                     }
                     Err(e) => panic!("accept: {e}"),
                 };
+                // Accepted sockets can inherit the listener's nonblocking mode. Wait for the
+                // request headers instead of treating WouldBlock as an empty request (404).
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
                 stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
                 let mut bytes = Vec::new();

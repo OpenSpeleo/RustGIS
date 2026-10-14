@@ -4,6 +4,7 @@ Every asset file in this repository, with its source and licence.
 
 | File | Author / source | Licence |
 |---|---|---|
+| `crates/data/testdata/sorted-children.kml` | RustGIS project, authored test fixture | Apache-2.0 |
 | `crates/data/testdata/ogc_api/landing.json` | RustGIS project, authored test fixture | Apache-2.0 |
 | `crates/data/testdata/ogc_api/collections.json` | RustGIS project, authored test fixture | Apache-2.0 |
 | `crates/data/testdata/ogc_api/items.geojson` | RustGIS project, authored test fixture | Apache-2.0 |
