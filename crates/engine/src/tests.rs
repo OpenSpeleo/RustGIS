@@ -5909,7 +5909,7 @@ fn a_failed_command_reopens_the_layout_open_before_it() {
     assert_eq!(s.active_layout.and_then(|i| s.project.layouts.get(i)).map(|l| l.name.as_str()), Some("A"));
 }
 
-#[path = "../../data/testdata/ogc_api/server.rs"]
+#[path = "../../../tests/support/ogc_server.rs"]
 mod ogc_server;
 
 #[test]
@@ -5935,15 +5935,15 @@ fn ogc_landing_fixture_lists_and_loads_features() {
 
 #[test]
 fn ogc_landing_supplied_documents_never_fetch_capabilities() {
-    use ogc_server::{CATALOG, COLLECTIONS, LANDING, Server};
+    use ogc_server::{CATALOG, Server, fixture_collections, fixture_landing};
     let server = Server::fixture();
     let mut session = Session::new(Project::default());
-    let mut params = json!({"url":server.root(), "text":LANDING});
+    let mut params = json!({"url":server.root(), "text":fixture_landing()});
     let initial = session.run("service.layers", &params).unwrap();
     assert_eq!(initial["count"], 0);
     let next = initial["next"].as_str().unwrap();
     assert_eq!(next, format!("{}{CATALOG}?f=json&key=fixture-key", server.base));
-    params["documents"] = json!([{"url":next,"text":COLLECTIONS}]);
+    params["documents"] = json!([{"url":next,"text":fixture_collections()}]);
     let complete = session.run("service.layers", &params).unwrap();
     assert_eq!(complete["count"], 1);
     assert!(complete.get("next").is_none());
@@ -5956,15 +5956,15 @@ fn ogc_landing_supplied_documents_never_fetch_capabilities() {
 
 #[test]
 fn ogc_landing_keeps_map_tiles_and_collection_provenance() {
-    use ogc_server::{CATALOG, COLLECTIONS, FEATURES, ITEMS, LANDING, Route, Server};
-    let mut landing: Value = serde_json::from_str(LANDING).unwrap();
+    use ogc_server::{CATALOG, ITEMS, Route, Server, fixture_collections, fixture_features, fixture_landing};
+    let mut landing: Value = serde_json::from_str(fixture_landing()).unwrap();
     landing["links"].as_array_mut().unwrap().push(json!({
         "rel":"tilesets-map", "type":"application/json", "href":"/map/tiles"
     }));
-    let mut collections: Value = serde_json::from_str(COLLECTIONS).unwrap();
+    let mut collections: Value = serde_json::from_str(fixture_collections()).unwrap();
     // The dataset map and a feature collection can share the id "map".
     collections["collections"][0]["id"] = json!("map");
-    let server = Server::new(vec![Route::new(ITEMS, FEATURES)]);
+    let server = Server::new(vec![Route::new(ITEMS, fixture_features())]);
     let root = format!("{}?f=json", server.root());
     let catalog = format!("{}{CATALOG}?f=json&key=fixture-key", server.base);
     let mut params = json!({"url":server.root(),"text":landing.to_string(),"documents":[{"url":catalog,"text":collections.to_string()}]});
@@ -6025,7 +6025,7 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
             .contains("loop")
     );
     for documents in [json!({}), json!([{}]), json!([{"url":root,"text":23}]), json!([{}, {}, {}, {}])] {
-        assert!(session.run("service.layers", &json!({"url":root,"text":ogc_server::LANDING,"documents":documents})).is_err());
+        assert!(session.run("service.layers", &json!({"url":root,"text":ogc_server::fixture_landing(),"documents":documents})).is_err());
     }
     for text in ["{", "{}", "{\"links\":[]}"] {
         assert!(session.run("service.layers", &json!({"url":root,"text":text})).is_err());
@@ -6034,9 +6034,9 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
 
 #[test]
 fn ogc_landing_http_failure_keeps_existing_map_layers() {
-    use ogc_server::{CATALOG, LANDING, ROOT, Route, Server};
+    use ogc_server::{CATALOG, ROOT, Route, Server, fixture_landing};
     for with_map in [false, true] {
-        let mut landing: Value = serde_json::from_str(LANDING).unwrap();
+        let mut landing: Value = serde_json::from_str(fixture_landing()).unwrap();
         if with_map {
             landing["links"].as_array_mut().unwrap().push(json!({"rel":"tilesets-map","href":"/map/tiles"}));
         }
@@ -6096,7 +6096,7 @@ fn ogc_discovery_keeps_features_whose_id_matches_a_generated_tile_name() {
 
 #[test]
 fn ogc_group_import_refresh_and_persistence() {
-    use ogc_server::{CATALOG, FEATURES, ITEMS, LINE_ITEMS, ROOT, Server};
+    use ogc_server::{CATALOG, ITEMS, LINE_ITEMS, ROOT, Server, fixture_features};
     let server = Server::group_fixture();
     let mut s = Session::new(Project::default());
     let added = s.run("service.import", &json!({"url":server.root()})).unwrap();
@@ -6122,7 +6122,7 @@ fn ogc_group_import_refresh_and_persistence() {
     let project = serde_json::to_string(&s.project).unwrap();
     s = Session::new(Project::from_json(&project).unwrap());
     assert_eq!(s.map().service_groups[0].id, group);
-    server.set(ITEMS, &FEATURES.replace("Test Place", "Updated Place"));
+    server.set(ITEMS, &fixture_features().replace("Test Place", "Updated Place"));
     let before = server.requests().len();
     s.run("service.refresh", &json!({"layer":points})).unwrap();
     let point = s.map().layer(points).unwrap();
@@ -6141,14 +6141,14 @@ fn ogc_group_import_refresh_and_persistence() {
 
 #[test]
 fn ogc_group_failures_are_atomic_and_membership_refreshes() {
-    use ogc_server::{CATALOG, COLLECTIONS, GROUP_COLLECTIONS, ITEMS, LINE_ITEMS, LINES, Server};
+    use ogc_server::{CATALOG, ITEMS, LINE_ITEMS, Server, fixture_collections, fixture_group_collections, fixture_lines};
     let server = Server::group_fixture();
     let mut s = Session::new(Project::default());
     server.set(LINE_ITEMS, "not GeoJSON");
     assert!(s.run("service.import", &json!({"url":server.root()})).is_err());
     assert!(s.map().layers.is_empty());
     assert!(s.map().service_groups.is_empty());
-    server.set(LINE_ITEMS, LINES);
+    server.set(LINE_ITEMS, fixture_lines());
     let group = s.run("service.import", &json!({"url":server.root()})).unwrap()["group"].clone();
     let old = serde_json::to_value(&s.project).unwrap();
     server.set(ITEMS, r#"{"type":"FeatureCollection","features":[]}"#);
@@ -6159,7 +6159,7 @@ fn ogc_group_failures_are_atomic_and_membership_refreshes() {
     server.set(CATALOG, "not JSON");
     assert!(s.run("service.refresh", &json!({"group":group})).is_err());
     assert_eq!(serde_json::to_value(&s.project).unwrap(), old);
-    server.set(CATALOG, COLLECTIONS);
+    server.set(CATALOG, fixture_collections());
     s.run("service.refresh", &json!({"group":group})).unwrap();
     assert_eq!(s.map().layers.len(), 1);
     assert_eq!(s.map().service_groups[0].children.len(), 1);
@@ -6171,8 +6171,8 @@ fn ogc_group_failures_are_atomic_and_membership_refreshes() {
         layer["geometry_rev"] = json!(0);
     }
     assert_eq!(restored, old);
-    server.set(CATALOG, GROUP_COLLECTIONS);
-    server.set(LINE_ITEMS, LINES);
+    server.set(CATALOG, fixture_group_collections());
+    server.set(LINE_ITEMS, fixture_lines());
     s.run("service.refresh", &json!({"group":group})).unwrap();
     let point = s.map().layer_by_name("Places").unwrap().id;
     s.run("layer.remove", &json!({"layer":point})).unwrap();
@@ -6184,10 +6184,10 @@ fn ogc_group_failures_are_atomic_and_membership_refreshes() {
     assert_eq!(s.map().service_groups[0].name, "Survey");
     assert!(!s.map().service_groups[0].expanded);
     // A newly advertised collection joins the group; a hidden group stays hidden.
-    let mut more: Value = serde_json::from_str(GROUP_COLLECTIONS).unwrap();
+    let mut more: Value = serde_json::from_str(fixture_group_collections()).unwrap();
     more["collections"].as_array_mut().unwrap().push(json!({"id":"new-routes","title":"New Routes",
         "links":[{"rel":"items","type":"application/geo+json","href":"/new-routes"}]}));
-    server.set("/new-routes", LINES);
+    server.set("/new-routes", fixture_lines());
     server.set(CATALOG, &more.to_string());
     s.run("service.refresh", &json!({"group":group})).unwrap();
     assert_eq!(s.map().service_groups[0].children.len(), 3);
@@ -6201,21 +6201,79 @@ fn ogc_group_failures_are_atomic_and_membership_refreshes() {
 
 #[test]
 fn ogc_group_supplied_responses_never_fetch_and_need_every_child() {
-    use ogc_server::{CATALOG, FEATURES, GROUP_COLLECTIONS, LANDING, LINES, ROOT};
+    use ogc_server::{CATALOG, ROOT, fixture_features, fixture_group_collections, fixture_landing, fixture_lines};
     let mut s = Session::new(Project::default());
-    let mut p = json!({"url":format!("https://example.org{ROOT}"), "text":LANDING,
-        "documents":[{"url":format!("https://example.org{CATALOG}?f=json&key=fixture-key"),"text":GROUP_COLLECTIONS}]});
+    let mut p = json!({"url":format!("https://example.org{ROOT}"), "text":fixture_landing(),
+        "documents":[{"url":format!("https://example.org{CATALOG}?f=json&key=fixture-key"),"text":fixture_group_collections()}]});
     let plan = s.run("service.groupPlan", &p).unwrap();
     let points = plan["layers"][0]["offer"]["url"].clone();
     let lines = plan["layers"][1]["offer"]["url"].clone();
-    p["responses"] = json!([{"url":points,"text":FEATURES}]);
+    p["responses"] = json!([{"url":points,"text":fixture_features()}]);
     assert!(s.run("service.import", &p).unwrap_err().contains("missing downloaded response"));
     assert!(s.map().layers.is_empty());
-    p["responses"] = json!([{"url":points,"text":FEATURES},{"url":lines,"text":LINES}]);
+    p["responses"] = json!([{"url":points,"text":fixture_features()},{"url":lines,"text":fixture_lines()}]);
     s.run("service.import", &p).unwrap();
     assert_eq!(s.map().layers.len(), 2);
     assert_eq!(s.map().service_groups[0].children.len(), 2);
     for id in ["service.import", "service.refresh", "service.groupPlan"] {
         assert!(crate::cmd::tiles::NETWORK.contains(&id));
+    }
+}
+
+#[test]
+fn ogc_refresh_reconciles_fields_and_preserves_compatible_settings() {
+    use ogc_server::{ITEMS, Server, fixture_features};
+    for renderer in ["unique", "graduated", "proportional"] {
+        for refresh_child in [false, true] {
+            let server = Server::group_fixture();
+            let features = |properties: Value| {
+                let mut doc: Value = serde_json::from_str(fixture_features()).unwrap();
+                doc["features"][0]["properties"] = properties;
+                doc.to_string()
+            };
+            server.set(ITEMS, &features(json!({"name":"Place", "value":12, "keep":1})));
+            let mut s = Session::new(Project::default());
+            let group = s.run("service.import", &json!({"url":server.root()})).unwrap()["group"].clone();
+            let layer = s.map().layer_by_name("Places").unwrap().id;
+            let target = if refresh_child { json!({"layer":layer}) } else { json!({"group":group}) };
+            s.run("layer.symbology", &json!({"layer":layer, "type":renderer, "field":"value"})).unwrap();
+            let l = s.map_mut().layer_mut(layer).unwrap();
+            l.labels.enabled = true;
+            l.labels.field = "name".into();
+            l.labels.size = 19.;
+            l.definition_query = Some("value > 0".into());
+            l.display_filters = ["value > 0", "keep = 1"]
+                .map(|q| rustgis_map::effects::DisplayFilter { name: q.into(), min_scale: None, max_scale: None, where_: q.into() })
+                .into();
+            let style = l.renderer.clone();
+            let labels = l.labels.clone();
+            // Reordered and additional fields do not invalidate references by name.
+            server.set(ITEMS, &features(json!({"extra":true, "name":"Updated", "value":20, "keep":1})));
+            s.run("service.refresh", &target).unwrap();
+            let l = s.map().layer(layer).unwrap();
+            assert_eq!(l.renderer, style);
+            assert_eq!(l.labels, labels);
+            assert_eq!(l.definition_query.as_deref(), Some("value > 0"));
+            assert_eq!(l.display_filters.len(), 2);
+            // Geometry is unchanged, but fields used by the old configuration disappear.
+            server.set(ITEMS, &features(json!({"replacement":"New", "keep":1})));
+            s.run("service.refresh", &target).unwrap();
+            let l = s.map().layer(layer).unwrap();
+            assert!(matches!(l.renderer, rustgis_map::Renderer::Single(_)));
+            assert!(!l.labels.enabled);
+            assert!(l.labels.field.is_empty());
+            assert_eq!(l.labels.size, 19.);
+            assert!(l.definition_query.is_none());
+            assert_eq!(l.display_filters.len(), 1);
+            assert_eq!(l.display_filters[0].where_, "keep = 1");
+            s.run("edit.undo", &Value::Null).unwrap();
+            let l = s.map().layer(layer).unwrap();
+            assert_eq!(l.renderer, style);
+            assert_eq!(l.labels, labels);
+            // Numeric renderers cannot use a field which has become text; unique values can.
+            server.set(ITEMS, &features(json!({"name":"Place", "value":"text", "keep":1})));
+            s.run("service.refresh", &target).unwrap();
+            assert_eq!(matches!(s.map().layer(layer).unwrap().renderer, rustgis_map::Renderer::Single(_)), renderer != "unique");
+        }
     }
 }

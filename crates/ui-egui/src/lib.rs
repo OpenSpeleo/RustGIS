@@ -201,10 +201,15 @@ pub struct TilesResolve {
 
 /// Fetches an address into a slot, off the frame.
 pub(crate) fn fetch_into(url: &str) -> Slot<Result<Vec<u8>, String>> {
+    fetch_into_limited(url, rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD)
+}
+
+pub(crate) fn fetch_into_limited(url: &str, max: usize) -> Slot<Result<Vec<u8>, String>> {
     let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
     let land = slot.clone();
-    rustgis_engine::render::rustgis_tiles::cache::download(
+    rustgis_engine::render::rustgis_tiles::cache::download_limited(
         url,
+        max,
         Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
     );
     slot

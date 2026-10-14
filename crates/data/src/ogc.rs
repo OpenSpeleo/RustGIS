@@ -1550,6 +1550,10 @@ pub fn fix_axes(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/support/ogc.rs"]
+mod fixtures;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1837,10 +1841,10 @@ mod tests {
     #[test]
     fn ogc_landing_fixture_discovers_json_and_resolves_items() {
         let address = "https://example.org/ogc/user/test-token?f=json";
-        let service = parse(address, include_bytes!("../testdata/ogc_api/landing.json")).unwrap();
+        let service = parse(address, super::fixtures::fixture_landing().as_bytes()).unwrap();
         let catalog = service.collections_url.unwrap();
         assert_eq!(catalog, "https://example.org/ogc/user/test-token/catalog?f=json&key=fixture-key");
-        let collections = parse(&catalog, include_bytes!("../testdata/ogc_api/collections.json")).unwrap();
+        let collections = parse(&catalog, super::fixtures::fixture_collections().as_bytes()).unwrap();
         assert_eq!(collections.layers.len(), 1);
         assert_eq!(collections.layers[0].title, "Places");
         assert_eq!(

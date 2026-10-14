@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
-  <Style id="Zulu"><IconStyle><color>ff0000ff</color></IconStyle></Style>
-  <Style id="alpha"><IconStyle><color>ff00ff00</color></IconStyle></Style>
-  <Style id="Bravo"><IconStyle><color>ffff0000</color></IconStyle></Style>
-  <Placemark><name>Last</name><styleUrl>#Zulu</styleUrl><Point><coordinates>10,50</coordinates></Point></Placemark>
-  <Placemark><name>First</name><styleUrl>#alpha</styleUrl><Point><coordinates>11,50</coordinates></Point></Placemark>
-  <Placemark><name>Middle</name><styleUrl>#Bravo</styleUrl><Point><coordinates>12,50</coordinates></Point></Placemark>
-</Document></kml>

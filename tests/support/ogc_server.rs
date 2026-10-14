@@ -1,4 +1,5 @@
 //! Shared, test-only HTTP fixture server. Exact routes, recorded requests, bounded shutdown.
+#![cfg(test)]
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
@@ -11,11 +12,9 @@ use std::time::{Duration, Instant};
 pub const ROOT: &str = "/ogc/user/test-token";
 pub const CATALOG: &str = "/ogc/user/test-token/catalog";
 pub const ITEMS: &str = "/ogc/user/test-token/collections/places/items";
-pub const LANDING: &str = include_str!("landing.json");
-pub const COLLECTIONS: &str = include_str!("collections.json");
-pub const FEATURES: &str = include_str!("items.geojson");
-pub const GROUP_COLLECTIONS: &str = include_str!("group-collections.json");
-pub const LINES: &str = include_str!("lines.geojson");
+#[path = "ogc.rs"]
+mod fixtures;
+pub use fixtures::*;
 pub const LINE_ITEMS: &str = "/ogc/user/test-token/collections/routes/items";
 
 #[derive(Clone)]
@@ -48,15 +47,19 @@ pub struct Server {
 
 impl Server {
     pub fn fixture() -> Self {
-        Self::new(vec![Route::new(ROOT, LANDING), Route::new(CATALOG, COLLECTIONS), Route::new(ITEMS, FEATURES)])
+        Self::new(vec![
+            Route::new(ROOT, fixture_landing()),
+            Route::new(CATALOG, fixture_collections()),
+            Route::new(ITEMS, fixture_features()),
+        ])
     }
 
     pub fn group_fixture() -> Self {
         Self::new(vec![
-            Route::new(ROOT, LANDING),
-            Route::new(CATALOG, GROUP_COLLECTIONS),
-            Route::new(ITEMS, FEATURES),
-            Route::new(LINE_ITEMS, LINES),
+            Route::new(ROOT, fixture_landing()),
+            Route::new(CATALOG, fixture_group_collections()),
+            Route::new(ITEMS, fixture_features()),
+            Route::new(LINE_ITEMS, fixture_lines()),
         ])
     }
 

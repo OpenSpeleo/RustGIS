@@ -112,7 +112,18 @@ fn assert_child_order(h: &mut egui_kittest::Harness<'_, RustGisApp>, labels: &[&
 
 #[test]
 fn nested_children_from_kml_kmz_and_categorized_files_are_sorted() {
-    let kml = include_bytes!("../../data/testdata/sorted-children.kml");
+    let mut kml = String::from(r#"<kml xmlns="http://www.opengis.net/kml/2.2"><Document>"#);
+    for (i, (style, color, name)) in
+        [("Zulu", "ff0000ff", "Last"), ("alpha", "ff00ff00", "First"), ("Bravo", "ffff0000", "Middle")].iter().enumerate()
+    {
+        kml.push_str(&format!("<Style id=\"{style}\"><IconStyle><color>{color}</color></IconStyle></Style>"));
+        kml.push_str(&format!(
+            "<Placemark><name>{name}</name><styleUrl>#{style}</styleUrl><Point><coordinates>{},50</coordinates></Point></Placemark>",
+            10 + i
+        ));
+    }
+    kml.push_str("</Document></kml>");
+    let kml = kml.into_bytes();
     let kmz = rustgis_engine::data::zip::write(&[("doc.kml".into(), kml.to_vec())]).unwrap();
     let csv = b"lon,lat,category\n10,50,Zulu\n11,50,alpha\n12,50,Bravo\n";
     let geojson = serde_json::to_vec(&json!({"type":"FeatureCollection", "features":
@@ -144,12 +155,12 @@ fn nested_children_from_kml_kmz_and_categorized_files_are_sorted() {
 
 #[test]
 fn nested_ogc_children_sort_on_import_rename_refresh_and_reopen() {
-    use ogc_server::{FEATURES, GROUP_COLLECTIONS, LINES};
+    use ogc_server::{fixture_features, fixture_group_collections, fixture_lines};
     let mut h = harness();
     h.state_mut().run("project.new", json!(null)).unwrap();
     // Use supplied fixture documents/responses: no live service or network needed.
     let params = |app: &mut RustGisApp, names: &[&str]| {
-        let fixture: serde_json::Value = serde_json::from_str(GROUP_COLLECTIONS).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(fixture_group_collections()).unwrap();
         let collections: Vec<_> = names
             .iter()
             .enumerate()
@@ -169,7 +180,7 @@ fn nested_ogc_children_sort_on_import_rename_refresh_and_reopen() {
                 .unwrap()
                 .iter()
                 .enumerate()
-                .map(|(i, l)| { json!({"url":l["offer"]["url"],"text":if i % 2 == 0 { FEATURES } else { LINES }}) })
+                .map(|(i, l)| { json!({"url":l["offer"]["url"],"text":if i % 2 == 0 { fixture_features() } else { fixture_lines() }}) })
                 .collect::<Vec<_>>()
         );
         p
@@ -1002,7 +1013,7 @@ fn dialogs_can_be_moved() {
     assert!((after.left_top() - (before.left_top() + (to - from))).length() < 2.0, "{before:?} → {after:?}");
 }
 
-#[path = "../../data/testdata/ogc_api/server.rs"]
+#[path = "../../../tests/support/ogc_server.rs"]
 mod ogc_server;
 
 fn wait_for_ogc(h: &mut egui_kittest::Harness<'static, RustGisApp>, ready: impl Fn(&RustGisApp) -> bool) {
@@ -1051,11 +1062,11 @@ fn ogc_landing_connect_and_add_use_fixture_documents() {
 
 #[test]
 fn ogc_landing_lists_both_offerings_and_keeps_maps_after_failure() {
-    use ogc_server::{CATALOG, COLLECTIONS, LANDING, ROOT, Route, Server};
+    use ogc_server::{CATALOG, ROOT, Route, Server, fixture_collections, fixture_landing};
     for fail in [false, true] {
-        let mut landing: serde_json::Value = serde_json::from_str(LANDING).unwrap();
+        let mut landing: serde_json::Value = serde_json::from_str(fixture_landing()).unwrap();
         landing["links"].as_array_mut().unwrap().push(json!({"rel":"tilesets-map","href":"/map/tiles"}));
-        let mut catalog = Route::new(CATALOG, COLLECTIONS);
+        let mut catalog = Route::new(CATALOG, fixture_collections());
         catalog.delay = std::time::Duration::from_millis(100);
         if fail {
             catalog.status = 503;
@@ -1085,8 +1096,8 @@ fn ogc_landing_lists_both_offerings_and_keeps_maps_after_failure() {
 
 #[test]
 fn ogc_landing_reconnecting_ignores_a_delayed_response() {
-    use ogc_server::{LANDING, ROOT, Route, Server};
-    let mut delayed = Route::new(ROOT, LANDING);
+    use ogc_server::{ROOT, Route, Server, fixture_landing};
+    let mut delayed = Route::new(ROOT, fixture_landing());
     delayed.delay = std::time::Duration::from_millis(400);
     let old = Server::new(vec![delayed]);
     let current = Server::fixture();
@@ -1110,7 +1121,7 @@ fn ogc_landing_reconnecting_ignores_a_delayed_response() {
 
 #[test]
 fn ogc_group_context_menus_refresh_all_or_one_child() {
-    use ogc_server::{CATALOG, FEATURES, ITEMS, LINE_ITEMS, ROOT, Server};
+    use ogc_server::{CATALOG, ITEMS, LINE_ITEMS, ROOT, Server, fixture_features};
     let server = Server::group_fixture();
     let mut h = harness();
     h.state_mut().run("ui.language", json!({"code":"en"})).unwrap();
@@ -1126,7 +1137,7 @@ fn ogc_group_context_menus_refresh_all_or_one_child() {
     h.get_by_label("My OGC Layer");
     h.get_by_label("Places");
     h.get_by_label("Routes");
-    server.set(ITEMS, &FEATURES.replace("Test Place", "New Place"));
+    server.set(ITEMS, &fixture_features().replace("Test Place", "New Place"));
     let before = server.requests().len();
     h.get_by_label("Places").click_secondary();
     h.step();
@@ -1156,10 +1167,10 @@ fn ogc_group_context_menus_refresh_all_or_one_child() {
 
 #[test]
 fn ogc_group_background_import_does_not_land_in_a_new_project() {
-    use ogc_server::{FEATURES, GROUP_COLLECTIONS, ITEMS, LINE_ITEMS, LINES, ROOT, Route, Server};
-    let mut route = Route::new(ROOT, GROUP_COLLECTIONS);
+    use ogc_server::{ITEMS, LINE_ITEMS, ROOT, Route, Server, fixture_features, fixture_group_collections, fixture_lines};
+    let mut route = Route::new(ROOT, fixture_group_collections());
     route.delay = std::time::Duration::from_millis(150);
-    let server = Server::new(vec![route, Route::new(ITEMS, FEATURES), Route::new(LINE_ITEMS, LINES)]);
+    let server = Server::new(vec![route, Route::new(ITEMS, fixture_features()), Route::new(LINE_ITEMS, fixture_lines())]);
     let mut h = harness();
     h.state_mut().run("ui.importService", json!({"url":server.root()})).unwrap();
     wait_for_ogc(&mut h, |_| !server.requests().is_empty());

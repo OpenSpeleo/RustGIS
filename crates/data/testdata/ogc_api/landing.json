@@ -1,7 +1,0 @@
-{
-  "title": "Example GIS",
-  "links": [
-    {"rel": "data", "type": "text/html", "href": "/ogc/user/test-token/catalog.html"},
-    {"rel": "data", "type": "application/json", "href": "/ogc/user/test-token/catalog?f=json&key=fixture-key"}
-  ]
-}

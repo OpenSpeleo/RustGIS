@@ -107,12 +107,12 @@ fn listing(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn download(url: &str) -> Result<Vec<u8>, String> {
-    crate::render::rustgis_tiles::cache::download_blocking(url)
+fn download(url: &str, max: usize) -> Result<Vec<u8>, String> {
+    crate::render::rustgis_tiles::cache::download_blocking_limited(url, max)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn download(_: &str) -> Result<Vec<u8>, String> {
+fn download(_: &str, _: usize) -> Result<Vec<u8>, String> {
     Err("the browser must supply downloaded feature responses".into())
 }
 
@@ -143,7 +143,7 @@ fn read(s: &mut Session, p: &Value) -> Result<(Value, Vec<(ServiceChild, Dataset
                 }
                 text.as_bytes().to_vec()
             }
-            None => download(url)?,
+            None => download(url, MAX_GROUP_BYTES.saturating_sub(bytes_read))?,
         };
         bytes_read = bytes_read.saturating_add(bytes.len());
         if bytes_read > MAX_GROUP_BYTES {
@@ -224,9 +224,24 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             dataset.name = layer.name.clone();
             layer.dataset = dataset;
             layer.selection.clear();
-            if changed_type {
+            let invalid_renderer = match &layer.renderer {
+                rustgis_map::Renderer::Single(_) => false,
+                rustgis_map::Renderer::Unique { field, .. } => layer.dataset.field_index(field).is_none(),
+                rustgis_map::Renderer::Graduated { field, .. } | rustgis_map::Renderer::Proportional { field, .. } => {
+                    layer.dataset.field_index(field).and_then(|i| layer.dataset.fields.get(i)).is_none_or(|f| !f.ty.is_numeric())
+                }
+            };
+            if changed_type || invalid_renderer {
                 layer.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(layer.geometry_type(), layer.id));
             }
+            if layer.dataset.field_index(&layer.labels.field).is_none() {
+                layer.labels.enabled = false;
+                layer.labels.field.clear();
+            }
+            if layer.definition_query.as_deref().is_some_and(|q| rustgis_data::query::parse(q, &layer.dataset).is_err()) {
+                layer.definition_query = None;
+            }
+            layer.display_filters.retain(|f| rustgis_data::query::parse(&f.where_, &layer.dataset).is_ok());
             layer.touch_geometry();
             child.layer = layer.id;
         } else {

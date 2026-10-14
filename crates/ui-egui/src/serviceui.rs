@@ -1,7 +1,7 @@
 //! Background group import/refresh for both desktop and browser. Discovery and updates live in
 //! engine commands; this state machine only supplies their downloaded documents.
 
-use crate::{RustGisApp, Slot, fetch_into};
+use crate::{RustGisApp, Slot, fetch_into, fetch_into_limited};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 
@@ -90,7 +90,7 @@ impl Import {
     fn next(&mut self) {
         self.current = self.remaining.pop_front();
         if let Some(url) = &self.current {
-            self.slot = fetch_into(url);
+            self.slot = fetch_into_limited(url, rustgis_engine::cmd::service::MAX_GROUP_BYTES.saturating_sub(self.bytes));
         }
     }
 
