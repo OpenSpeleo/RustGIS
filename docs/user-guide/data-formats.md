@@ -101,11 +101,28 @@ come through the From URL… dialog (`ui.addUrl`) or a `?data=` link. GeoJSON, C
 ## Map and feature services
 
 **Home › Add Data › From Service…** connects to a service by its address, lists what it offers from
-its capabilities, and adds a layer at a time (`service.layers` and `service.add` from scripts, the
-command line and MCP). An OGC API landing page works directly: RustGIS follows its advertised
+its capabilities. For OGC API feature collections, enter a group name (initially **My OGC Layer**)
+and choose **Import All**. The group expands into ordinary point, line and polygon layers with
+the same legends, styling and attribute tables as file imports. Other offerings have individual
+**Add** buttons (`service.layers` and `service.add` from scripts, the command line and MCP).
+An OGC API landing page works directly: RustGIS follows its advertised
 JSON collections link, so you don't need to append `/collections`. If the landing page also
 offers map tiles, they remain listed alongside the collections. A failed collections request
 leaves any available map layers usable and shows the error.
+
+Right-click the group and choose **Refresh** to rediscover its collections and update them all,
+including newly added or removed collections. Right-click a child and choose **Refresh** to
+update only that collection. Existing children keep their names, styles and visibility (a changed
+geometry type gets a suitable default symbol); selections are cleared because row positions can
+change. Refresh replaces local feature edits with the service's data. Failed imports or refreshes
+leave the map intact; a successful operation is one undo step. Groups and their source connections
+are saved in the project. Group downloads are limited to 2000 collections and 64 MB in total and
+use the existing per-collection feature limits.
+
+Scripts use `service.import {"url":"…","name":"My OGC Layer"}` and
+`service.refresh {"group":id}` or `service.refresh {"layer":id}`. The browser uses
+`service.groupPlan` to discover the requests, then supplies `text`, `documents`, and
+`responses: [{"url":"…","text":"GeoJSON"}]` to import or refresh without blocking network calls.
 
 | Service | What it lists | How a layer is added |
 | --- | --- | --- |

@@ -1,0 +1,11 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "route-1",
+      "properties": {"name": "Test Route"},
+      "geometry": {"type": "LineString", "coordinates": [[10.0, 50.0], [11.0, 51.0]]}
+    }
+  ]
+}

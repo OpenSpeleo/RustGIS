@@ -547,11 +547,34 @@ pub struct LayerMark {
     next: u32,
 }
 
+/// Feature collections imported together from one OGC service. Children remain ordinary
+/// layers, sharing rendering, legends, tables and editing with file imports.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceGroup {
+    pub id: u32,
+    pub name: String,
+    pub url: String,
+    pub kind: String,
+    #[serde(default = "yes")]
+    pub expanded: bool,
+    pub children: Vec<ServiceChild>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceChild {
+    pub layer: u32,
+    /// The collection identifier, independent of its display name.
+    pub collection: String,
+    pub source_url: String,
+}
+
 /// A map: an ordered list of layers (index 0 draws on top), a basemap and a camera.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Map {
     pub name: String,
     pub layers: Vec<Layer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_groups: Vec<ServiceGroup>,
     pub basemap: Basemap,
     /// Web tile basemaps and overlays over the basemap and under the layers (index 0 on top).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -654,6 +677,7 @@ impl Map {
         Map {
             name: name.into(),
             layers: Vec::new(),
+            service_groups: Vec::new(),
             basemap: Basemap::Paper,
             tiles: Vec::new(),
             camera: Camera::world(),
@@ -673,8 +697,17 @@ impl Map {
     }
 
     fn next_id(&mut self) -> u32 {
-        let id = self.next_layer_id.max(self.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1);
-        self.next_layer_id = id + 1;
+        let id = self
+            .next_layer_id
+            .max(self.layers.iter().map(|l| l.id).chain(self.service_groups.iter().map(|g| g.id)).max().unwrap_or(0).saturating_add(1));
+        self.next_layer_id = id.saturating_add(1);
+        id
+    }
+
+    pub fn add_service_group(&mut self, mut group: ServiceGroup) -> u32 {
+        group.id = self.next_id();
+        let id = group.id;
+        self.service_groups.push(group);
         id
     }
 

@@ -2304,3 +2304,9 @@ Zoom To World	Zoom para o mundo
 — fps	— fps
 ⌘K	⌘K
 The service's answer isn't UTF-8 text	A resposta do serviço não é texto UTF-8
+Import All	Importar tudo
+Import Service	Importar serviço
+Service Import Requests	Pedidos de importação do serviço
+Service Group	Grupo de serviço
+A service import or refresh is already running.	Já está em curso uma importação ou atualização de serviço.
+Service group data exceeds 64 MB.	Os dados do grupo de serviço excedem 64 MB.

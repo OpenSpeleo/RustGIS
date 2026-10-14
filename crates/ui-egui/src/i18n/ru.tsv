@@ -2304,3 +2304,9 @@ Zoom To World	Приблизить к миру
 — fps	— к/с
 ⌘K	⌘K
 The service's answer isn't UTF-8 text	Ответ сервиса не является текстом UTF-8
+Import All	Импортировать всё
+Import Service	Импортировать сервис
+Service Import Requests	Запросы импорта сервиса
+Service Group	Группа сервиса
+A service import or refresh is already running.	Импорт или обновление сервиса уже выполняется.
+Service group data exceeds 64 MB.	Объём данных группы сервиса превышает 64 МБ.

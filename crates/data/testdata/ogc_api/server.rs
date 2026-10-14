@@ -14,7 +14,11 @@ pub const ITEMS: &str = "/ogc/user/test-token/collections/places/items";
 pub const LANDING: &str = include_str!("landing.json");
 pub const COLLECTIONS: &str = include_str!("collections.json");
 pub const FEATURES: &str = include_str!("items.geojson");
+pub const GROUP_COLLECTIONS: &str = include_str!("group-collections.json");
+pub const LINES: &str = include_str!("lines.geojson");
+pub const LINE_ITEMS: &str = "/ogc/user/test-token/collections/routes/items";
 
+#[derive(Clone)]
 pub struct Route {
     pub path: String,
     pub body: String,
@@ -39,6 +43,7 @@ pub struct Server {
     requests: Arc<Mutex<Vec<Request>>>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
+    routes: Arc<Mutex<Vec<Route>>>,
 }
 
 impl Server {
@@ -46,7 +51,27 @@ impl Server {
         Self::new(vec![Route::new(ROOT, LANDING), Route::new(CATALOG, COLLECTIONS), Route::new(ITEMS, FEATURES)])
     }
 
+    pub fn group_fixture() -> Self {
+        Self::new(vec![
+            Route::new(ROOT, LANDING),
+            Route::new(CATALOG, GROUP_COLLECTIONS),
+            Route::new(ITEMS, FEATURES),
+            Route::new(LINE_ITEMS, LINES),
+        ])
+    }
+
+    pub fn set(&self, path: &str, body: &str) {
+        let mut routes = self.routes.lock().unwrap();
+        if let Some(route) = routes.iter_mut().find(|r| r.path == path) {
+            route.body = body.into();
+        } else {
+            routes.push(Route::new(path, body));
+        }
+    }
+
     pub fn new(routes: Vec<Route>) -> Self {
+        let routes = Arc::new(Mutex::new(routes));
+        let serving = routes.clone();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -88,7 +113,7 @@ impl Server {
                         })
                         .collect(),
                 });
-                let route = routes.iter().find(|r| r.path == path);
+                let route = serving.lock().unwrap().iter().find(|r| r.path == path).cloned();
                 let (status, body) = match route {
                     Some(r) => {
                         let until = Instant::now() + r.delay;
@@ -106,7 +131,7 @@ impl Server {
                 );
             }
         });
-        Self { base, requests, stop, worker: Some(worker) }
+        Self { base, requests, stop, worker: Some(worker), routes }
     }
 
     pub fn root(&self) -> String {

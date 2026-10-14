@@ -14,8 +14,14 @@ use serde_json::{Value, json};
 use super::ps;
 use crate::{CmdResult, CommandSpec as C, Session};
 
+#[path = "service_group.rs"]
+mod group;
+
+/// The total feature response bytes accepted by a grouped import or refresh.
+pub const MAX_GROUP_BYTES: usize = 64 << 20;
+
 pub fn commands() -> Vec<C> {
-    vec![
+    let mut commands = vec![
         C::new("service.layers", "Service Layers", "Home › Add", layers).view().params(
             r#"{"url": "a WMS, WMTS or WFS address (GetCapabilities is added), an OGC API collections address or landing page (its map tiles and linked collections), or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer", "type"?: "wms"|"wmts"|"wfs"|"ogcapi"|"arcgis" (guessed from the address), "text"?: "the capabilities document, when already fetched", "documents"?: [{"url": "a discovered document address", "text": "its fetched JSON"}]} → layers with source_url, and next when supplied documents need another fetch"#,
         ),
@@ -28,7 +34,9 @@ pub fn commands() -> Vec<C> {
         C::new("catalog.search", "Search Catalogue", "Home › Add", catalog_search).view().params(
             r#"{"url": "a catalogue's CSW address", "query"?: "words anywhere in the records", "bbox"?: [west, south, east, north] | "view" (none by default), "start"?: "the first record's position (a page's next)", "text"?: "the GetRecords answer, when already fetched"} → records with their service and download links (service.add or layer.addUrl add them)"#,
         ),
-    ]
+    ];
+    commands.extend(group::commands());
+    commands
 }
 
 fn url_of(p: &Value) -> Result<&str, String> {
@@ -47,6 +55,8 @@ struct Discovery {
     service: Service,
     sources: Vec<String>,
     next: Option<String>,
+    error: Option<String>,
+    excluded_layers: bool,
 }
 
 impl Discovery {
@@ -54,6 +64,7 @@ impl Discovery {
         if self.service.layers.is_empty() {
             Err(error)
         } else {
+            self.error = Some(error.clone());
             self.service.notes.push(error);
             self.next = None;
             Ok(self)
@@ -106,7 +117,12 @@ fn capabilities(p: &Value) -> Result<Discovery, String> {
             fetch_capabilities(original, &address)
         };
         let service = match parsed {
-            Ok(s) => vet(s, &address),
+            Ok(s) => {
+                let before = s.layers.len();
+                let vetted = vet(s, &address);
+                result.excluded_layers |= vetted.layers.len() != before;
+                vetted
+            }
             Err(e) => return result.failed(e),
         };
         seen.insert(address.clone());

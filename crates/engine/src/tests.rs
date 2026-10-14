@@ -6093,3 +6093,129 @@ fn ogc_discovery_keeps_features_whose_id_matches_a_generated_tile_name() {
     assert_eq!(listing["layers"][1]["offer"]["type"], "features");
     assert_eq!(listing["layers"][1]["offer"]["url"], "https://example.org/items/other?limit=10000");
 }
+
+#[test]
+fn ogc_group_import_refresh_and_persistence() {
+    use ogc_server::{CATALOG, FEATURES, ITEMS, LINE_ITEMS, ROOT, Server};
+    let server = Server::group_fixture();
+    let mut s = Session::new(Project::default());
+    let added = s.run("service.import", &json!({"url":server.root()})).unwrap();
+    let group = added["group"].as_u64().unwrap() as u32;
+    assert_eq!(s.map().service_groups.len(), 1);
+    assert_eq!(s.map().service_groups[0].name, "My OGC Layer");
+    assert_eq!(s.map().service_groups[0].children.len(), 2);
+    assert_eq!(s.map().layers.len(), 2);
+    let points = s.map().layer_by_name("Places").unwrap().id;
+    let lines = s.map().layer_by_name("Routes").unwrap().id;
+    assert_eq!(s.map().layer(lines).unwrap().geometry_type(), rustgis_data::GeometryType::Polyline);
+    server.assert_fixture_requests(&[ROOT, CATALOG, ITEMS, LINE_ITEMS]);
+    // One operation, one undo entry, including the parent and all children.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert!(s.map().layers.is_empty());
+    assert!(s.map().service_groups.is_empty());
+    s.run("edit.redo", &Value::Null).unwrap();
+    s.run("layer.rename", &json!({"layer":points,"name":"My places"})).unwrap();
+    s.run("layer.color", &json!({"layer":points,"color":"#123456"})).unwrap();
+    s.run("layer.visibility", &json!({"layer":points,"visible":false})).unwrap();
+    let style = serde_json::to_value(&s.map().layer(points).unwrap().renderer).unwrap();
+    let old_lines = serde_json::to_value(&s.map().layer(lines).unwrap().dataset).unwrap();
+    let project = serde_json::to_string(&s.project).unwrap();
+    s = Session::new(Project::from_json(&project).unwrap());
+    assert_eq!(s.map().service_groups[0].id, group);
+    server.set(ITEMS, &FEATURES.replace("Test Place", "Updated Place"));
+    let before = server.requests().len();
+    s.run("service.refresh", &json!({"layer":points})).unwrap();
+    let point = s.map().layer(points).unwrap();
+    assert_eq!(point.name, "My places");
+    assert!(!point.visible);
+    assert_eq!(serde_json::to_value(&point.renderer).unwrap(), style);
+    assert!(serde_json::to_string(&point.dataset).unwrap().contains("Updated Place"));
+    assert_eq!(serde_json::to_value(&s.map().layer(lines).unwrap().dataset).unwrap(), old_lines);
+    assert_eq!(server.requests()[before..].iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), [ROOT, CATALOG, ITEMS]);
+    let before = server.requests().len();
+    s.run("service.refresh", &json!({"group":group})).unwrap();
+    assert_eq!(server.requests()[before..].iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), [ROOT, CATALOG, ITEMS, LINE_ITEMS]);
+    assert_eq!(s.map().service_groups[0].children.iter().map(|c| c.layer).collect::<Vec<_>>(), [points, lines]);
+    assert!(!s.map().layer(points).unwrap().visible);
+}
+
+#[test]
+fn ogc_group_failures_are_atomic_and_membership_refreshes() {
+    use ogc_server::{CATALOG, COLLECTIONS, GROUP_COLLECTIONS, ITEMS, LINE_ITEMS, LINES, Server};
+    let server = Server::group_fixture();
+    let mut s = Session::new(Project::default());
+    server.set(LINE_ITEMS, "not GeoJSON");
+    assert!(s.run("service.import", &json!({"url":server.root()})).is_err());
+    assert!(s.map().layers.is_empty());
+    assert!(s.map().service_groups.is_empty());
+    server.set(LINE_ITEMS, LINES);
+    let group = s.run("service.import", &json!({"url":server.root()})).unwrap()["group"].clone();
+    let old = serde_json::to_value(&s.project).unwrap();
+    server.set(ITEMS, r#"{"type":"FeatureCollection","features":[]}"#);
+    server.set(LINE_ITEMS, "not GeoJSON");
+    assert!(s.run("service.refresh", &json!({"group":group})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), old);
+    // A failed linked document must not masquerade as an empty collection list.
+    server.set(CATALOG, "not JSON");
+    assert!(s.run("service.refresh", &json!({"group":group})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), old);
+    server.set(CATALOG, COLLECTIONS);
+    s.run("service.refresh", &json!({"group":group})).unwrap();
+    assert_eq!(s.map().layers.len(), 1);
+    assert_eq!(s.map().service_groups[0].children.len(), 1);
+    assert!(s.map().layers[0].dataset.features.is_empty());
+    s.run("edit.undo", &Value::Null).unwrap();
+    // Undo deliberately invalidates geometry caches; compare all persisted state except that revision.
+    let mut restored = serde_json::to_value(&s.project).unwrap();
+    for layer in restored["maps"][0]["layers"].as_array_mut().unwrap() {
+        layer["geometry_rev"] = json!(0);
+    }
+    assert_eq!(restored, old);
+    server.set(CATALOG, GROUP_COLLECTIONS);
+    server.set(LINE_ITEMS, LINES);
+    s.run("service.refresh", &json!({"group":group})).unwrap();
+    let point = s.map().layer_by_name("Places").unwrap().id;
+    s.run("layer.remove", &json!({"layer":point})).unwrap();
+    s.run("service.refresh", &json!({"group":group})).unwrap();
+    assert_eq!(s.map().layers.len(), 2);
+    assert!(s.map().layer_by_name("Places").is_some());
+    s.run("service.group", &json!({"group":group,"visible":false,"expanded":false,"name":"Survey"})).unwrap();
+    assert!(s.map().layers.iter().all(|l| !l.visible));
+    assert_eq!(s.map().service_groups[0].name, "Survey");
+    assert!(!s.map().service_groups[0].expanded);
+    // A newly advertised collection joins the group; a hidden group stays hidden.
+    let mut more: Value = serde_json::from_str(GROUP_COLLECTIONS).unwrap();
+    more["collections"].as_array_mut().unwrap().push(json!({"id":"new-routes","title":"New Routes",
+        "links":[{"rel":"items","type":"application/geo+json","href":"/new-routes"}]}));
+    server.set("/new-routes", LINES);
+    server.set(CATALOG, &more.to_string());
+    s.run("service.refresh", &json!({"group":group})).unwrap();
+    assert_eq!(s.map().service_groups[0].children.len(), 3);
+    assert_eq!(s.map().layers.len(), 3);
+    assert!(s.map().layers.iter().all(|l| !l.visible));
+    assert!(s.map().layer_by_name("New Routes").is_some());
+    s.run("service.group", &json!({"group":group,"remove":true})).unwrap();
+    assert!(s.map().layers.is_empty());
+    assert!(s.map().service_groups.is_empty());
+}
+
+#[test]
+fn ogc_group_supplied_responses_never_fetch_and_need_every_child() {
+    use ogc_server::{CATALOG, FEATURES, GROUP_COLLECTIONS, LANDING, LINES, ROOT};
+    let mut s = Session::new(Project::default());
+    let mut p = json!({"url":format!("https://example.org{ROOT}"), "text":LANDING,
+        "documents":[{"url":format!("https://example.org{CATALOG}?f=json&key=fixture-key"),"text":GROUP_COLLECTIONS}]});
+    let plan = s.run("service.groupPlan", &p).unwrap();
+    let points = plan["layers"][0]["offer"]["url"].clone();
+    let lines = plan["layers"][1]["offer"]["url"].clone();
+    p["responses"] = json!([{"url":points,"text":FEATURES}]);
+    assert!(s.run("service.import", &p).unwrap_err().contains("missing downloaded response"));
+    assert!(s.map().layers.is_empty());
+    p["responses"] = json!([{"url":points,"text":FEATURES},{"url":lines,"text":LINES}]);
+    s.run("service.import", &p).unwrap();
+    assert_eq!(s.map().layers.len(), 2);
+    assert_eq!(s.map().service_groups[0].children.len(), 2);
+    for id in ["service.import", "service.refresh", "service.groupPlan"] {
+        assert!(crate::cmd::tiles::NETWORK.contains(&id));
+    }
+}

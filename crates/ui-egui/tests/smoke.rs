@@ -939,9 +939,10 @@ fn ogc_landing_connect_and_add_use_fixture_documents() {
     assert_eq!(conn.listing.as_ref().unwrap()["count"], 1);
     h.step();
     h.get_by_label("Places");
-    h.get_by_label("Add").click();
+    h.get_by_label("Import All").click();
     wait_for_ogc(&mut h, |app| app.session.map().layer_by_name("Places").is_some());
     let dataset = &h.state().session.map().layer_by_name("Places").unwrap().dataset;
+    assert_eq!(h.state().session.map().service_groups[0].name, "My OGC Layer");
     assert_eq!(dataset.features.len(), 1);
     assert_eq!(dataset.features[0].geometry, Some(rustgis_engine::data::Geometry::Point(rustgis_engine::geom::Coord::new(10., 50.))));
     let name = dataset.fields.iter().position(|f| f.name == "name").unwrap();
@@ -1006,4 +1007,71 @@ fn ogc_landing_reconnecting_ignores_a_delayed_response() {
     assert_eq!(conn.listing.as_ref().unwrap()["layers"][0]["title"], "Places");
     assert_eq!(old.requests().len(), 1);
     current.assert_fixture_requests(&[ogc_server::ROOT, ogc_server::CATALOG]);
+}
+
+#[test]
+fn ogc_group_context_menus_refresh_all_or_one_child() {
+    use ogc_server::{CATALOG, FEATURES, ITEMS, LINE_ITEMS, ROOT, Server};
+    let server = Server::group_fixture();
+    let mut h = harness();
+    h.state_mut().run("ui.language", json!({"code":"en"})).unwrap();
+    h.state_mut().run("project.new", json!(null)).unwrap();
+    h.state_mut().run("ui.importService", json!({"url":server.root()})).unwrap();
+    wait_for_ogc(&mut h, |app| app.ui.service_import.is_none());
+    assert_eq!(h.state().session.map().layers.len(), 2, "{:?}", h.state().dialogs.error);
+    let group = h.state().session.map().service_groups[0].id;
+    let point = h.state().session.map().layer_by_name("Places").unwrap().id;
+    for _ in 0..3 {
+        h.step();
+    }
+    h.get_by_label("My OGC Layer");
+    h.get_by_label("Places");
+    h.get_by_label("Routes");
+    server.set(ITEMS, &FEATURES.replace("Test Place", "New Place"));
+    let before = server.requests().len();
+    h.get_by_label("Places").click_secondary();
+    h.step();
+    h.get_by_label("Refresh").click();
+    wait_for_ogc(&mut h, |app| app.ui.service_import.is_none());
+    assert!(serde_json::to_string(&h.state().session.map().layer(point).unwrap().dataset).unwrap().contains("New Place"));
+    assert_eq!(server.requests()[before..].iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), [ROOT, CATALOG, ITEMS]);
+    for _ in 0..3 {
+        h.step();
+    }
+    let before = server.requests().len();
+    h.get_by_label("My OGC Layer").click_secondary();
+    h.step();
+    h.get_by_label("Refresh").click();
+    wait_for_ogc(&mut h, |app| app.ui.service_import.is_none());
+    assert_eq!(server.requests()[before..].iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), [ROOT, CATALOG, ITEMS, LINE_ITEMS]);
+    assert_eq!(h.state().session.map().service_groups[0].id, group);
+    // Collapse hides child rows without removing data or their styles.
+    h.state_mut().run("service.group", json!({"group":group,"expanded":false})).unwrap();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.query_by_label("Places").is_none());
+    assert!(h.query_by_label("Routes").is_none());
+    assert_eq!(h.state().session.map().layers.len(), 2);
+}
+
+#[test]
+fn ogc_group_background_import_does_not_land_in_a_new_project() {
+    use ogc_server::{FEATURES, GROUP_COLLECTIONS, ITEMS, LINE_ITEMS, LINES, ROOT, Route, Server};
+    let mut route = Route::new(ROOT, GROUP_COLLECTIONS);
+    route.delay = std::time::Duration::from_millis(150);
+    let server = Server::new(vec![route, Route::new(ITEMS, FEATURES), Route::new(LINE_ITEMS, LINES)]);
+    let mut h = harness();
+    h.state_mut().run("ui.importService", json!({"url":server.root()})).unwrap();
+    wait_for_ogc(&mut h, |_| !server.requests().is_empty());
+    h.state_mut().run("project.new", json!({"name":"Another project"})).unwrap();
+    wait_for_ogc(&mut h, |app| app.ui.service_import.is_none());
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    while std::time::Instant::now() < until {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.state().session.map().layers.is_empty());
+    assert!(h.state().session.map().service_groups.is_empty());
+    assert_eq!(server.requests().len(), 1);
 }

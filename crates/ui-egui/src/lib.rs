@@ -32,6 +32,7 @@ mod reportpane;
 mod ribbon;
 mod s3ui;
 mod searchbox;
+mod serviceui;
 mod sourcespane;
 mod sqlpane;
 mod stacui;
@@ -344,6 +345,8 @@ pub struct UiState {
     pub link_zoomed: bool,
     /// The service Add From Service is connected (or connecting) to.
     pub service: Option<ServiceConn>,
+    pub service_import: Option<serviceui::Import>,
+    pub service_group_name: String,
     /// Add From Service › Catalogue: the search and the records found.
     pub csw: cswui::State,
     /// STAC Search: its choices, results and the request under way.
@@ -414,6 +417,8 @@ impl Default for UiState {
             cog_probes: Vec::new(),
             link_zoomed: false,
             service: None,
+            service_import: None,
+            service_group_name: "My OGC Layer".into(),
             csw: Default::default(),
             stac: Default::default(),
             s3: Default::default(),
@@ -1326,6 +1331,8 @@ impl RustGisApp {
             }
             // A map or feature service: the dialog, then (with an address) its capabilities,
             // fetched off the frame; the dialog lists its layers when they land.
+            "ui.importService" => serviceui::start(self, p, false)?,
+            "ui.refreshService" => serviceui::start(self, p, true)?,
             "ui.addService" => {
                 let Some(url) = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()) else {
                     return self.run("ui.dialog", json!({"name": "addService"}));
@@ -2251,6 +2258,7 @@ impl RustGisApp {
         }
         sqlpane::poll(self, ctx);
         self.poll_service();
+        serviceui::poll(self, ctx);
         // Sources the AI Assistant or a background add brought in (not through `run`) are kept
         // too: a generation compared each frame.
         sourcespane::save(self);

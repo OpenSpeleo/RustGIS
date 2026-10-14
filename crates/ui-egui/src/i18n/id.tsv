@@ -2304,3 +2304,9 @@ Zoom To World	Zoom ke Dunia
 — fps	— fps
 ⌘K	⌘K
 The service's answer isn't UTF-8 text	Respons layanan bukan teks UTF-8
+Import All	Impor semua
+Import Service	Impor layanan
+Service Import Requests	Permintaan impor layanan
+Service Group	Grup layanan
+A service import or refresh is already running.	Impor atau penyegaran layanan sedang berjalan.
+Service group data exceeds 64 MB.	Data grup layanan melebihi 64 MB.

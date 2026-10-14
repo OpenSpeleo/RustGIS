@@ -2304,3 +2304,9 @@ Zoom To World	缩放至世界
 — fps	— fps
 ⌘K	⌘K
 The service's answer isn't UTF-8 text	服务的响应不是 UTF-8 文本
+Import All	全部导入
+Import Service	导入服务
+Service Import Requests	服务导入请求
+Service Group	服务组
+A service import or refresh is already running.	服务导入或刷新已在进行中。
+Service group data exceeds 64 MB.	服务组数据超过 64 MB。

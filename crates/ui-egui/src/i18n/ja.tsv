@@ -2304,3 +2304,9 @@ Zoom To World	世界にズーム
 — fps	— fps
 ⌘K	⌘K
 The service's answer isn't UTF-8 text	サービスの応答は UTF-8 テキストではありません
+Import All	すべてインポート
+Import Service	サービスをインポート
+Service Import Requests	サービスのインポート要求
+Service Group	サービスグループ
+A service import or refresh is already running.	サービスのインポートまたは更新が既に進行中です。
+Service group data exceeds 64 MB.	サービスグループのデータが 64 MB を超えています。

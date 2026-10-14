@@ -52,6 +52,7 @@ impl Dialogs {
             "renameLayer" => "renameLayer",
             "renameMap" => "renameMap",
             "renameLayout" => "renameLayout",
+            "renameServiceGroup" => "renameServiceGroup",
             "coordinateSystem" => "coordinateSystem",
             "graphicText" => "graphicText",
             "camera" => "camera",
@@ -324,6 +325,14 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                         app.run("layout.rename", json!({"layout": old, "newName": new}))
                     };
                     r.map(|_| ())
+                });
+            }
+            "renameServiceGroup" => {
+                ui.label(tl!("Name"));
+                ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).desired_width(f32::INFINITY));
+                close = buttons(app, ui, "Rename", |app| {
+                    let group = app.dialogs.layer.parse::<u32>().map_err(|e| e.to_string())?;
+                    app.run("service.group", json!({"group":group,"name":app.dialogs.text})).map(|_| ())
                 });
             }
             _ => {
@@ -614,6 +623,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     }
     // The service: connecting, an error, or its layers.
     let mut add: Option<Value> = None;
+    let mut import = None;
     if let Some(conn) = &app.ui.service {
         ui.separator();
         if let Some(e) = &conn.error {
@@ -625,6 +635,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             // Borrowed, not cloned: the dialog draws every frame.
             let none = Vec::new();
             let layers = v.get("layers").and_then(Value::as_array).unwrap_or(&none);
+            let grouped = kind.starts_with("OGC API");
             ui.label(
                 egui::RichText::new(crate::i18n::fmt(
                     "{kind} {title}: {count} layers",
@@ -635,6 +646,20 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             for n in v.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
                 ui.label(egui::RichText::new(n).small().weak());
             }
+            if grouped && layers.iter().any(|l| l["offer"]["type"] == "features") {
+                ui.horizontal(|ui| {
+                    ui.label(tl!("Name"));
+                    ui.text_edit_singleline(&mut app.ui.service_group_name);
+                    let ready = conn.pending.is_none() && conn.error.is_none() && app.ui.service_import.is_none();
+                    if ui.add_enabled(ready, egui::Button::new(tl!("Import All"))).clicked() {
+                        let mut p = json!({"url":conn.url,"name":app.ui.service_group_name,"text":conn.text,"documents":conn.documents});
+                        if conn.kind != "auto" {
+                            p["type"] = json!(conn.kind);
+                        }
+                        import = Some(p);
+                    }
+                });
+            }
             if layers.len() > SHOWN_LAYERS {
                 ui.label(
                     egui::RichText::new(crate::i18n::fmt("The first {n} are listed.", &[("n", &SHOWN_LAYERS.to_string())])).small().weak(),
@@ -643,7 +668,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
             egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                 for l in layers.iter().take(SHOWN_LAYERS) {
                     ui.horizontal(|ui| {
-                        if ui.small_button(tl!("Add")).clicked() {
+                        if !(grouped && l["offer"]["type"] == "features") && ui.small_button(tl!("Add")).clicked() {
                             add = Some(l.clone());
                         }
                         let name = l.get("name").and_then(Value::as_str).unwrap_or("");
@@ -665,6 +690,17 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 ui.label(crate::i18n::fmt("Connecting to {url}…", &[("url", pending)]));
             });
         }
+    }
+    if let Some(p) = import
+        && let Err(e) = app.run("ui.importService", p)
+    {
+        app.dialogs.error = Some(e);
+    }
+    if app.ui.service_import.is_some() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(tl!("Downloading…"));
+        });
     }
     if let (Some(l), Some(conn)) = (add, &app.ui.service) {
         let (url, kind, text) = (conn.url.clone(), conn.kind, conn.text.clone().unwrap_or_default());
