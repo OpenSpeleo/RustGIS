@@ -3905,6 +3905,11 @@ fn wcs_coverages_and_catalogue_records() {
     let v = s.run("service.layers", &json!({"url": url, "text": caps})).unwrap();
     assert_eq!((v["kind"].as_str(), v["layers"][0]["offer"]["type"].as_str()), (Some("WCS"), Some("coverage")), "{v}");
     let p = json!({"url": url, "layer": "soc", "text": caps, "describe": describe, "bbox": [0, 40, 5.4, 60]});
+    let mut selected = p.clone();
+    selected["source_url"] = v["layers"][0]["source_url"].clone();
+    assert!(s.run("service.coverage", &selected).is_ok());
+    selected["source_url"] = json!("https://example.org/another-source");
+    assert!(s.run("service.coverage", &selected).is_err());
     let c = s.run("service.coverage", &p).unwrap();
     let get = c["url"].as_str().unwrap();
     assert!(get.contains("SUBSET=Long(5,5.4)&SUBSET=Lat(49.2,50)&SCALESIZE=Long(1024),Lat(2048)"), "{get}");
