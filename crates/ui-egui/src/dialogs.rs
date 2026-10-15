@@ -160,6 +160,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "saveProject" => "Save Project As",
         "renameMap" => "Rename Map",
         "renameLayout" => "Rename Layout",
+        "renameServiceGroup" => "Rename Service Group",
         _ => "Rename Layer",
     };
     let t = Tokens::get(ctx);
