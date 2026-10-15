@@ -124,12 +124,17 @@ pub fn json_url(address: &str) -> String {
     url.into()
 }
 
+/// A collections link uses either the short or full OGC data relation.
+fn is_data_link(link: &serde_json::Value) -> bool {
+    matches!(link.get("rel").and_then(|rel| rel.as_str()), Some("data" | "http://www.opengis.net/def/rel/ogc/1.0/data"))
+}
+
 /// Chooses JSON before an untyped data link, without guessing an endpoint or copying credentials.
 fn collections_link(address: &str, links: &[serde_json::Value]) -> Option<String> {
     let base = url::Url::parse(address).ok()?;
     links
         .iter()
-        .filter(|l| l.get("rel").and_then(|v| v.as_str()) == Some("data"))
+        .filter(|l| is_data_link(l))
         .filter_map(|l| {
             let priority = match l.get("type").and_then(|v| v.as_str()) {
                 Some(t) if t.split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json")) => 0,
@@ -1208,7 +1213,7 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
             }
             return Ok(service);
         }
-        return Err(if links.iter().any(|l| l.get("rel").and_then(|r| r.as_str()) == Some("data")) {
+        return Err(if links.iter().any(is_data_link) {
             "the OGC API landing page has no usable JSON collections link".into()
         } else {
             "not an OGC API collections document (no \"collections\")".into()
@@ -1857,6 +1862,7 @@ mod tests {
 
     #[test]
     fn ogc_landing_links_are_resolved_without_inventing_paths_or_credentials() {
+        let data_uri = "http://www.opengis.net/def/rel/ogc/1.0/data";
         for (href, expected) in [
             ("https://other.example/catalog?key=other", "https://other.example/catalog?key=other&f=json"),
             ("/catalog", "https://example.org/catalog?f=json"),
@@ -1869,11 +1875,15 @@ mod tests {
             let result = parse("https://example.org/api/root?token=private&f=json", body.as_bytes()).unwrap();
             assert_eq!(result.collections_url.as_deref(), Some(expected));
         }
+        let body = serde_json::json!({"links": [{"rel": data_uri, "href": "/catalog"}]}).to_string();
+        let result = parse("https://example.org/api", body.as_bytes()).unwrap();
+        assert_eq!(result.collections_url.as_deref(), Some("https://example.org/catalog?f=json"));
         for link in [
             serde_json::json!({"rel":"data", "href":"javascript:alert(1)"}),
             serde_json::json!({"rel":"data", "href":"file:///etc/passwd"}),
             serde_json::json!({"rel":"data", "href":"/catalog", "type":"text/html"}),
             serde_json::json!({"rel":"data", "href":""}),
+            serde_json::json!({"rel":data_uri, "href":"/catalog", "type":"text/html"}),
         ] {
             let doc = serde_json::json!({"links":[link]}).to_string();
             assert!(parse("https://example.org/api", doc.as_bytes()).unwrap_err().contains("no usable JSON collections link"));
