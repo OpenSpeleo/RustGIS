@@ -1110,6 +1110,66 @@ fn symbology_classes_follow_the_definition_query() {
 }
 
 #[test]
+fn layer_class_style_edits_one_class() {
+    // #314: one class's colour and legend label, by command (the Symbology pane runs the same).
+    let mut s = world();
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
+    let renderer = |s: &Session| s.map().layer_by_name("Countries").unwrap().renderer.clone();
+    let first = |s: &Session| renderer(s).legend().into_iter().next().unwrap();
+    let value = first(&s).label;
+    let r = s.run("layer.classStyle", &json!({"layer": "Countries", "value": value, "color": "#123456", "label": "Rich"})).unwrap();
+    assert_eq!(r["label"], "Rich");
+    assert!(r["color"].as_str().is_some_and(|c| c.starts_with("#123456")), "{r}");
+    assert_eq!(first(&s).label, "Rich");
+    // One undo step, as every command is.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(first(&s).label, value);
+    s.run("edit.redo", &Value::Null).unwrap();
+    let edited = first(&s);
+    assert_eq!(edited.label, "Rich");
+    // Applying the symbology again on the same field keeps the edit; a new scheme recolours
+    // every class and keeps the label.
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
+    assert_eq!(first(&s), edited);
+    s.run("layer.ramp", &json!({"layer": "Countries", "ramp": "Ember"})).unwrap();
+    assert_eq!(first(&s).label, "Rich");
+    assert_ne!(first(&s).symbol, edited.symbol);
+    // The fallback class.
+    s.run("layer.classStyle", &json!({"layer": "Countries", "other": true, "label": "Rest"})).unwrap();
+    assert_eq!(renderer(&s).legend().last().map(|e| e.label.clone()).as_deref(), Some("Rest"));
+    // Refused: no such class, the wrong way to name one, two at once, or nothing to change.
+    for bad in [
+        json!({"layer": "Countries", "value": "Atlantis", "color": "#000000"}),
+        json!({"layer": "Countries", "index": 0, "color": "#000000"}),
+        json!({"layer": "Countries", "value": value, "other": true, "label": "x"}),
+        json!({"layer": "Countries", "value": value}),
+        json!({"layer": "Countries", "value": value, "color": "red"}),
+        json!({"layer": "Countries", "value": value, "color": "#000000", "label": 5}),
+        json!({"layer": "Countries", "value": value, "label": null}),
+        json!({"layer": "Countries", "value": value, "label": "x", "color": 5}),
+        json!({"layer": "Countries", "value": value, "label": "x", "outline": true}),
+    ] {
+        assert!(s.run("layer.classStyle", &bad).is_err(), "{bad}");
+    }
+    // A malformed index says what is wrong with it.
+    for index in [json!(0.5), json!(-1), json!("first")] {
+        let err = s.run("layer.classStyle", &json!({"layer": "Countries", "index": index, "label": "x"})).unwrap_err();
+        assert!(err.contains("whole number"), "{index}: {err}");
+    }
+    // A numeric value names its class as the data prints it, whether sent as an integer or not.
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "pop_est"})).unwrap();
+    for v in [json!(211049527), json!(211049527.0)] {
+        let r = s.run("layer.classStyle", &json!({"layer": "Countries", "value": v, "label": "Brazil"})).unwrap();
+        assert_eq!(r["label"], "Brazil", "{v}");
+    }
+    // Graduated Colors, by number: the label replaces the range.
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "graduated", "field": "pop_est", "classes": 3})).unwrap();
+    s.run("layer.classStyle", &json!({"layer": "Countries", "index": 2, "label": "Most populous"})).unwrap();
+    assert_eq!(renderer(&s).legend().get(2).map(|e| e.label.clone()).as_deref(), Some("Most populous"));
+    assert!(s.run("layer.classStyle", &json!({"layer": "Countries", "index": 3, "label": "x"})).is_err());
+}
+
+#[test]
 fn layout_legends_list_what_the_frame_draws() {
     // #207's repro: classes taken before the query (or from a style) name values no drawn country has.
     let mut s = world();
@@ -3134,6 +3194,40 @@ fn tools_read_streamed_layers_whole() {
 }
 
 #[test]
+fn web_style_carries_the_layers_scale_limits_as_zooms() {
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let zooms = |s: &Session| {
+        let style = crate::cmd::sharing::web_style(s.map().layer(id).unwrap());
+        style["layers"].as_array().unwrap().iter().map(|l| (l.get("minzoom").cloned(), l.get("maxzoom").cloned())).collect::<Vec<_>>()
+    };
+    // No limits, no keys.
+    assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_none()));
+    let c = s.map().layer(id).unwrap().extent().center();
+    // Ground metres per pixel at the layer's latitude, and the MapLibre zoom (512-pixel world).
+    let zoom_of = |scale: f64| (2.0 * std::f64::consts::PI * 6_378_137.0 * c.y.to_radians().cos() / (512.0 * scale * 0.00028)).log2();
+    let l = s.map_mut().layer_mut(id).unwrap();
+    l.min_scale = Some(5_000_000.0);
+    l.max_scale = Some(100_000.0);
+    l.labels.enabled = true;
+    l.labels.field = "name".into();
+    let z = zooms(&s);
+    // The label layer is limited like the symbols.
+    assert!(z.len() >= 2, "{z:?}");
+    for (min, max) in z {
+        assert!((min.as_ref().unwrap().as_f64().unwrap() - zoom_of(5_000_000.0)).abs() < 1e-3, "{min:?}");
+        assert!((max.as_ref().unwrap().as_f64().unwrap() - zoom_of(100_000.0)).abs() < 1e-3, "{max:?}");
+    }
+    // One limit gives one key; nonsense gives none.
+    let l = s.map_mut().layer_mut(id).unwrap();
+    l.max_scale = Some(f64::NAN);
+    l.min_scale = Some(-1.0);
+    assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_none()));
+    s.map_mut().layer_mut(id).unwrap().max_scale = Some(100_000.0);
+    assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_some()));
+}
+
+#[test]
 fn web_shares_carry_every_feature_of_a_streamed_layer() {
     let path = grid_fgb("webshare", 50);
     let dir = std::env::temp_dir().join(format!("rustgis-webshare-{}", std::process::id()));
@@ -3166,6 +3260,18 @@ fn web_shares_carry_every_feature_of_a_streamed_layer() {
     assert!(windowed == std::fs::read(&scene).unwrap(), "the scene depends on the view");
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn reloading_web_layers_clears_the_tile_cache() {
+    use crate::render::rustgis_tiles::cache;
+    let mut s = world();
+    let before = cache::generation();
+    let r = s.run("map.reloadWebLayers", &Value::Null).unwrap();
+    // Other tests share the cache, so the generation may have moved further.
+    assert!(r["generation"].as_u64().unwrap() > before);
+    // Parameters are ignored.
+    s.run("map.reloadWebLayers", &json!({"junk": [1, null, "x"]})).unwrap();
 }
 
 #[test]

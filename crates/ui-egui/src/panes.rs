@@ -8,6 +8,7 @@ use rustgis_engine::Session;
 use rustgis_engine::analysis::{ParamKind, tools};
 use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::RasterLegend;
+use rustgis_engine::map::symbology::{ClassRef, ClassStyle, MAX_LABEL, MAX_UNIQUE, normalize_label};
 use rustgis_engine::map::tiles::TileLayer;
 use rustgis_engine::map::{ClassMethod, Layer, Marker, Ramp, RasterRenderer, Renderer, Resampling, Stretch, Symbol};
 use serde_json::{Value, json};
@@ -46,6 +47,10 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             ui.advance_cursor_after_rect(rect);
         });
     }
+    // Here rather than in the Symbology pane, so a drag still finishes if the pane closes
+    // meanwhile; and after the panes, so a change the picker reports as the pointer is let go
+    // joins the drag instead of running a command of its own.
+    finish_class_color_drag(app, ui);
 }
 
 fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
@@ -2523,7 +2528,7 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ui.label(
                 egui::RichText::new(crate::i18n::fmt("{n} classes", &[("n", &classes.len().to_string())])).size(11.5).color(t.text_dim),
             );
-            legend_list(ui, &l, t);
+            legend_list(app, ui, &l, t);
         }
         Renderer::Graduated { field, breaks, ramp, method, .. } => {
             field_combo(app, ui, "Field", field, &numeric, "graduated");
@@ -2549,12 +2554,12 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             });
             ramp_picker(app, ui, ramp, t);
             ui.add_space(6.0);
-            legend_list(ui, &l, t);
+            legend_list(app, ui, &l, t);
         }
         Renderer::Proportional { field, base, .. } => {
             field_combo(app, ui, "Field", field, &numeric, "proportional");
             symbol_editor(app, ui, *base, g, t);
-            legend_list(ui, &l, t);
+            legend_list(app, ui, &l, t);
         }
     }
     ui.add_space(10.0);
@@ -2618,20 +2623,178 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
     }
 }
 
-fn legend_list(ui: &mut Ui, l: &Layer, t: &Tokens) {
+/// Where a class colour being dragged in the Symbology pane's picker waits (#314).
+const CLASS_COLOR_DRAG: &str = "class_color_drag";
+
+/// A class colour being dragged: it previews in the project, and when the pointer is let go
+/// `finish_class_color_drag` puts `before` back and runs `params` (a layer.classStyle) once, so a
+/// colour pick is one undo step holding the pre-drag renderer (as `live_drag` does for the
+/// ribbon's sliders).
+#[derive(Clone)]
+struct ClassColorDrag {
+    layer: u32,
+    params: Value,
+    before: Renderer,
+}
+
+fn finish_class_color_drag(app: &mut RustGisApp, ui: &Ui) {
+    // Still dragging: the pointer is down and the window has focus (a release outside a window
+    // that lost focus may never arrive).
+    if ui.input(|i| i.pointer.primary_down() && i.focused) {
+        return;
+    }
+    let key = egui::Id::new(CLASS_COLOR_DRAG);
+    let Some(drag) = ui.data_mut(|d| {
+        let drag = d.get_temp::<ClassColorDrag>(key);
+        d.remove::<ClassColorDrag>(key);
+        drag
+    }) else {
+        return;
+    };
+    apply_class_color_drag(app, drag);
+}
+
+/// Puts the pre-drag renderer back and runs the drag's layer.classStyle: one undo step.
+fn apply_class_color_drag(app: &mut RustGisApp, drag: ClassColorDrag) {
+    // A layer removed mid-drag took its preview with it: there is nothing to restore or style.
+    let Some(layer) = app.session.map_mut().layer_mut(drag.layer) else { return };
+    layer.renderer = drag.before;
+    run_class_style(app, drag.params);
+}
+
+/// Runs a layer.classStyle from the pane; a refusal (the class is gone, say) shows as a notice.
+fn run_class_style(app: &mut RustGisApp, params: Value) {
+    if let Err(e) = app.run("layer.classStyle", params) {
+        app.session.notify(e, true);
+    }
+}
+
+/// The renderer's legend rows. A Unique Values or Graduated Colors class can be edited in place
+/// (#314): its colour button and its legend label, which applies when the field loses focus and
+/// goes back to the value or range when cleared.
+fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
+    // Each row's class, as layer.classStyle names it (and as the renderer does); none for
+    // renderers without classes.
+    let classes: Vec<(Value, ClassRef)> = match &l.renderer {
+        Renderer::Unique { classes, .. } => classes
+            .iter()
+            .map(|(k, _)| (json!({"value": k}), ClassRef::Value(k.clone())))
+            .chain(std::iter::once((json!({"other": true}), ClassRef::Other)))
+            .collect(),
+        Renderer::Graduated { symbols, .. } => (0..symbols.len()).map(|i| (json!({"index": i}), ClassRef::Index(i))).collect(),
+        _ => Vec::new(),
+    };
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(6)).show(
         ui,
         |ui| {
             ui.set_width(ui.available_width());
-            for e in l.renderer.legend().iter().take(64) {
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-                patch(
-                    ui.painter(),
-                    Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(18.0, 14.0)),
-                    &e.symbol,
-                    l.geometry_type(),
-                );
-                ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, &e.label, regular(11.5), t.text);
+            let legend = l.renderer.legend();
+            // At most MAX_UNIQUE classes (a style import can bring more), then Unique Values'
+            // `<all other values>`, the legend's last row, whatever their number.
+            let rows: Vec<usize> = match &l.renderer {
+                Renderer::Unique { .. } => {
+                    (0..legend.len().saturating_sub(1)).take(MAX_UNIQUE).chain(legend.len().checked_sub(1)).collect()
+                }
+                _ => (0..legend.len()).take(MAX_UNIQUE + 1).collect(),
+            };
+            let mut seen = std::collections::HashSet::new();
+            for i in rows {
+                let Some(e) = legend.get(i) else { continue };
+                // A value listed twice is drawn with its first class (`symbol_for`): the repeat
+                // is shown but not editable, since editing it would change the first.
+                let editable = classes.get(i).filter(|(_, r)| match r {
+                    ClassRef::Value(v) => seen.insert(v.clone()),
+                    _ => true,
+                });
+                let Some((class, class_ref)) = editable else {
+                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+                    patch(
+                        ui.painter(),
+                        Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(18.0, 14.0)),
+                        &e.symbol,
+                        l.geometry_type(),
+                    );
+                    ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, &e.label, regular(11.5), t.text);
+                    continue;
+                };
+                let with = |key: &str, v: Value| {
+                    let mut p = class.clone();
+                    if let Some(o) = p.as_object_mut() {
+                        o.insert("layer".into(), json!(l.id));
+                        o.insert(key.into(), v);
+                    }
+                    p
+                };
+                ui.horizontal(|ui| {
+                    // A polygon class keeps its own transparency when recoloured (`with_fill`), so
+                    // its button shows the colour solid rather than over a checkerboard.
+                    let shown = if l.geometry_type() == GeometryType::Polygon { e.symbol.fill.with_alpha(255) } else { e.symbol.fill };
+                    let mut c = c32(shown);
+                    if ui.color_edit_button_srgba(&mut c).on_hover_text(tl!("Class color")).changed() {
+                        let params = with("color", json!(rgba(c).hex()));
+                        let key = egui::Id::new(CLASS_COLOR_DRAG);
+                        let mut dragging = ui.data(|d| d.get_temp::<ClassColorDrag>(key));
+                        // One left pending on another layer (the pane switched layers mid-drag) is
+                        // finished first rather than dropped with its preview in place.
+                        if let Some(other) = dragging.take_if(|d| d.layer != l.id) {
+                            ui.data_mut(|d| d.remove::<ClassColorDrag>(key));
+                            apply_class_color_drag(app, other);
+                        }
+                        if ui.input(|i| i.pointer.primary_down()) || dragging.is_some() {
+                            // A drag in the picker: preview it, and let finish_class_color_drag run
+                            // the command once the pointer is let go.
+                            let before = dragging.map_or_else(|| l.renderer.clone(), |d| d.before);
+                            if let Some(layer) = app.session.map_mut().layer_mut(l.id) {
+                                let g = layer.geometry_type();
+                                let _ = layer.renderer.set_class_style(
+                                    class_ref,
+                                    &ClassStyle { color: Some(rgba(c)), ..Default::default() },
+                                    g,
+                                );
+                            }
+                            app.session.revision = app.session.revision.wrapping_add(1);
+                            ui.data_mut(|d| d.insert_temp(key, ClassColorDrag { layer: l.id, params, before }));
+                        } else {
+                            run_class_style(app, params);
+                        }
+                    }
+                    // The typing lives in the pane's state while the field has focus, under the
+                    // class it names (not the row, which another class can take meanwhile). Enter or
+                    // clicking away applies it; Escape drops it.
+                    let id = egui::Id::new(("class_label", l.id, l.renderer.field().unwrap_or_default(), class.to_string()));
+                    let typing = id.with("typing");
+                    let focused = ui.memory(|m| m.has_focus(id));
+                    let mut buf = match focused {
+                        true => ui.data_mut(|d| d.get_temp::<String>(typing)).unwrap_or_else(|| e.label.clone()),
+                        false => {
+                            // Left over from a field that stopped being drawn while focused.
+                            ui.data_mut(|d| d.remove::<String>(typing));
+                            e.label.clone()
+                        }
+                    };
+                    let r = ui
+                        .add(egui::TextEdit::singleline(&mut buf).id(id).char_limit(MAX_LABEL).desired_width(ui.available_width()))
+                        .on_hover_text(tl!("Legend label. Clear it to show the value again."));
+                    if r.lost_focus() {
+                        ui.data_mut(|d| d.remove::<String>(typing));
+                        // Compared as the command keeps labels: spaces, a pasted line break or a
+                        // cut alone are no change, and neither is clearing a class with no label
+                        // of its own.
+                        let text = normalize_label(&buf);
+                        let has_label = match (&l.renderer, class_ref) {
+                            (Renderer::Unique { class_labels, .. }, ClassRef::Value(v)) => class_labels.contains_key(v),
+                            (Renderer::Unique { other_label, .. }, ClassRef::Other) => other_label.is_some(),
+                            (Renderer::Graduated { class_labels, .. }, ClassRef::Index(i)) => class_labels.contains_key(i),
+                            _ => false,
+                        };
+                        let changed = text != normalize_label(&e.label) && (has_label || !text.is_empty());
+                        if changed && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            run_class_style(app, with("label", json!(buf)));
+                        }
+                    } else if r.has_focus() {
+                        ui.data_mut(|d| d.insert_temp(typing, buf));
+                    }
+                });
             }
         },
     );
