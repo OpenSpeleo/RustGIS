@@ -938,6 +938,8 @@ mod tests {
             classes: classes.clone(),
             other: Symbol::default_for(GeometryType::Point, 99),
             ramp: Ramp::Ember,
+            class_labels: BTreeMap::new(),
+            other_label: None,
         };
         let legend = renderer.legend();
         assert_eq!(
