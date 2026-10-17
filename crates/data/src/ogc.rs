@@ -48,6 +48,9 @@ pub struct Service {
     pub notes: Vec<String>,
     /// An OGC API landing page's advertised JSON collections document, resolved against it.
     pub collections_url: Option<String>,
+    /// Some advertised collections were left out (past the listing limit, or with an items
+    /// address RustGIS doesn't fetch): the listing isn't the whole service.
+    pub incomplete: bool,
 }
 
 /// Most layers listed from one service.
@@ -1286,6 +1289,10 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     if unreadable > 0 {
         service.notes.push(format!("{unreadable} collections link to their items with an address RustGIS doesn't fetch and are left out"));
     }
+    if collections.len() > MAX_LAYERS {
+        service.notes.push(format!("only the first {MAX_LAYERS} collections are listed"));
+    }
+    service.incomplete = unreadable > 0 || collections.len() > MAX_LAYERS;
     if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
         service.notes.push(format!("a collection is read up to {OGC_API_LIMIT} features (one page of the server's)"));
     }

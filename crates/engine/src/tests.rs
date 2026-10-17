@@ -6319,6 +6319,75 @@ fn ogc_group_supplied_responses_never_fetch_and_need_every_child() {
 }
 
 #[test]
+fn ogc_group_refresh_keeps_children_across_rotated_keys_and_rejects_bad_answers() {
+    use ogc_server::{CATALOG, ROOT, fixture_features, fixture_group_collections, fixture_landing, fixture_lines};
+    let doc = |key: &str| {
+        json!({"url":format!("https://example.org{ROOT}"), "text":fixture_landing().replace("fixture-key", key),
+            "documents":[{"url":format!("https://example.org{CATALOG}?f=json&key={key}"),
+                "text":fixture_group_collections().replace("fixture-key", key)}]})
+    };
+    let answers = |s: &mut Session, p: &Value, points: &str, lines: &str| {
+        let plan = s.run("service.groupPlan", p).unwrap();
+        json!([{"url":plan["layers"][0]["offer"]["url"],"text":points},{"url":plan["layers"][1]["offer"]["url"],"text":lines}])
+    };
+    let mut s = Session::new(Project::default());
+    let mut p = doc("fixture-key");
+    p["responses"] = answers(&mut s, &p, fixture_features(), fixture_lines());
+    let added = s.run("service.import", &p).unwrap();
+    let group = added["group"].clone();
+    let ids: Vec<u32> = s.map().service_groups[0].children.iter().map(|c| c.layer).collect();
+    s.run("layer.rename", &json!({"layer":ids[0], "name":"Renamed"})).unwrap();
+    s.map_mut().label_lock = Some(vec![(ids[0], 0), (ids[1], 0)]);
+
+    // A rotated key changes every source address but not the collections: the children stay.
+    let mut q = doc("rotated-key");
+    q["responses"] = answers(&mut s, &q, fixture_features(), fixture_lines());
+    q["group"] = group.clone();
+    s.run("service.refresh", &q).unwrap();
+    let g = &s.map().service_groups[0];
+    assert_eq!(g.children.iter().map(|c| c.layer).collect::<Vec<_>>(), ids);
+    assert!(g.children.iter().all(|c| c.source_url.contains("rotated-key")), "{:?}", g.children);
+    assert_eq!(s.map().layers.len(), 2);
+    assert_eq!(s.map().layer(ids[0]).unwrap().name, "Renamed");
+    assert!(s.map().label_lock.as_ref().is_some_and(|l| l.is_empty()));
+
+    // A child refresh follows a second rotation and records its new source.
+    let mut c = doc("third-key");
+    c["responses"] = answers(&mut s, &c, fixture_features(), fixture_lines());
+    c["layer"] = json!(ids[1]);
+    s.run("service.refresh", &c).unwrap();
+    let g = &s.map().service_groups[0];
+    assert!(g.children[1].source_url.contains("third-key") && g.children[0].source_url.contains("rotated-key"));
+    assert_eq!(s.map().layers.len(), 2);
+
+    // A FeatureCollection without a features array is malformed, not empty; `[]` is empty.
+    let before = s.map().layer(ids[0]).unwrap().dataset.features.len();
+    for bad in [r#"{"type":"FeatureCollection"}"#, r#"{"type":"FeatureCollection","features":null}"#] {
+        let mut r = doc("rotated-key");
+        r["responses"] = answers(&mut s, &r, bad, fixture_lines());
+        r["group"] = group.clone();
+        assert!(s.run("service.refresh", &r).unwrap_err().contains("FeatureCollection"));
+        assert_eq!(s.map().layer(ids[0]).unwrap().dataset.features.len(), before);
+    }
+    let mut r = doc("rotated-key");
+    r["responses"] = answers(&mut s, &r, r#"{"type":"FeatureCollection","features":[]}"#, fixture_lines());
+    r["group"] = group.clone();
+    s.run("service.refresh", &r).unwrap();
+    assert_eq!(s.map().layer(ids[0]).unwrap().dataset.features.len(), 0);
+
+    // A collections document past the listing limit can't be imported or refresh the group.
+    let many: Vec<Value> = (0..2001)
+        .map(|i| json!({"id":format!("c{i}"),"links":[{"rel":"items","type":"application/geo+json","href":format!("collections/c{i}/items")}]}))
+        .collect();
+    let mut t = doc("fixture-key");
+    t["documents"][0]["text"] = json!(json!({"collections":many}).to_string());
+    assert!(s.run("service.groupPlan", &t).unwrap_err().contains("more than 2000"));
+    t["group"] = group;
+    assert!(s.run("service.refresh", &t).unwrap_err().contains("more than 2000"));
+    assert_eq!(s.map().layers.len(), 2);
+}
+
+#[test]
 fn ogc_refresh_reconciles_fields_and_preserves_compatible_settings() {
     use ogc_server::{ITEMS, Server, fixture_features};
     for renderer in ["unique", "graduated", "proportional"] {

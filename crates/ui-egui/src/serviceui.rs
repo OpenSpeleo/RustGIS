@@ -9,7 +9,9 @@ pub struct Import {
     params: Value,
     refresh: bool,
     token: u64,
-    map: usize,
+    /// The originating map: its index and name (names are unique among a project's maps), so a
+    /// deleted or replaced map at that index cancels the import.
+    map: (usize, String),
     slot: Slot<Result<Vec<u8>, String>>,
     document: Option<String>,
     current: Option<String>,
@@ -43,7 +45,7 @@ pub fn start(app: &mut RustGisApp, p: &Value, refresh: bool) -> Result<(), Strin
         params,
         refresh,
         token: app.session.download_started(),
-        map: app.session.project.active_map,
+        map: active_map(app),
         slot: Slot::default(),
         document: None,
         current: None,
@@ -119,9 +121,14 @@ impl Import {
     }
 }
 
+fn active_map(app: &RustGisApp) -> (usize, String) {
+    let i = app.session.project.active_map;
+    (i, app.session.project.maps.get(i).map(|m| m.name.clone()).unwrap_or_default())
+}
+
 pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     let Some(mut task) = app.ui.service_import.take() else { return };
-    if !app.session.download_is_pending(task.token) || app.session.project.active_map != task.map {
+    if !app.session.download_is_pending(task.token) || active_map(app) != task.map {
         app.session.download_failed(task.token);
         return;
     }

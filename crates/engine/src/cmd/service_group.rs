@@ -69,26 +69,44 @@ fn listing(s: &mut Session, p: &Value) -> CmdResult {
     if !found.service.kind.starts_with("OGC API") {
         return Err("group import requires an OGC API feature service".into());
     }
+    if found.incomplete {
+        return Err(
+            "the service lists collections RustGIS cannot read (more than 2000, or unreadable addresses); the group was not changed".into(),
+        );
+    }
     let child = target(s, p)?.and_then(|(g, id)| id.and_then(|id| g.children.into_iter().find(|c| c.layer == id)));
-    let mut sources = Vec::new();
     let mut identities = std::collections::HashSet::new();
-    let mut selected = Vec::new();
+    let mut offered = Vec::new();
     for (layer, source) in found.service.layers.into_iter().zip(found.sources) {
         if !matches!(layer.offer, Offer::Features { .. }) {
-            continue;
-        }
-        if child.as_ref().is_some_and(|c| c.collection != layer.name || c.source_url != source) {
             continue;
         }
         if !identities.insert((source.clone(), layer.name.clone())) {
             return Err("the service advertises duplicate collection identifiers".into());
         }
-        selected.push(layer);
-        sources.push(source);
+        offered.push((layer, source));
     }
-    if selected.len() > 2000 {
+    if offered.len() > 2000 {
         return Err("a service group supports at most 2000 collections".into());
     }
+    // One child: its collection at its saved source, or else the one collection with its id (a
+    // rotated query or a moved collections document keeps the child's identity).
+    if let Some(c) = &child {
+        let exact = offered.iter().position(|(l, src)| l.name == c.collection && *src == c.source_url);
+        let pos = match exact {
+            Some(i) => Some(i),
+            None => {
+                let mut same = offered.iter().enumerate().filter(|(_, (l, _))| l.name == c.collection).map(|(i, _)| i);
+                let first = same.next();
+                if first.is_some() && same.next().is_some() {
+                    return Err("the service advertises the collection identifier more than once".into());
+                }
+                first
+            }
+        };
+        offered = pos.and_then(|i| offered.into_iter().nth(i)).into_iter().collect();
+    }
+    let (selected, sources): (Vec<_>, Vec<_>) = offered.into_iter().unzip();
     if found.next.is_none() && child.is_some() && selected.is_empty() {
         return Err("the collection is no longer advertised by this service".into());
     }
@@ -152,6 +170,9 @@ fn read(s: &mut Session, p: &Value) -> Result<(Value, Vec<(ServiceChild, Dataset
         let bytes = super::features_answer(s, name, bytes);
         let text = std::str::from_utf8(&bytes).map_err(|e| format!("{name}: {e}"))?;
         let (mut dataset, report) = rustgis_data::io::read_geojson(text, name).map_err(|e| format!("{name}: {e}"))?;
+        if dataset.features.is_empty() && !feature_collection(text) {
+            return Err(format!("{name}: the service's answer is not a GeoJSON FeatureCollection with a features array"));
+        }
         // Empty collections remain visible as children and can acquire geometry on refresh.
         dataset.source = Some(url.to_string());
         for message in report.messages {
@@ -167,6 +188,13 @@ fn read(s: &mut Session, p: &Value) -> Result<(Value, Vec<(ServiceChild, Dataset
         ));
     }
     Ok((listing, reads))
+}
+
+/// Whether an answer with no features is a FeatureCollection whose `features` is an array (an
+/// explicit `[]`), not a malformed envelope that would erase a refreshed child's features.
+fn feature_collection(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .is_ok_and(|v| v.get("type").and_then(Value::as_str) == Some("FeatureCollection") && v.get("features").is_some_and(Value::is_array))
 }
 
 fn import(s: &mut Session, p: &Value) -> CmdResult {
@@ -209,13 +237,33 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
     let hidden = old.children.iter().any(|c| s.map().layer(c.layer).is_some())
         && old.children.iter().filter_map(|c| s.map().layer(c.layer)).all(|l| !l.visible);
     let (_, reads) = read(s, p)?;
-    let mut children = Vec::new();
-    for (mut child, mut dataset) in reads {
-        let existing = old
-            .children
+    if !s.map().service_groups.iter().any(|g| g.id == old.id) {
+        return Err("the group was removed".into());
+    }
+    let read_count = |name: &str| reads.iter().filter(|(c, _)| c.collection == name).count();
+    let old_count = |name: &str| old.children.iter().filter(|c| c.collection == name).count();
+    // A child refresh updates that child. A group refresh keeps a child whose collection is at the
+    // same source, or else whose collection id is unique on both sides (the source address may
+    // carry a rotated token or have moved).
+    let matches: Vec<Option<u32>> = match child_id {
+        Some(id) => reads.iter().map(|_| Some(id)).collect(),
+        None => reads
             .iter()
-            .find(|c| c.collection == child.collection && c.source_url == child.source_url)
-            .and_then(|c| s.map_mut().layer_mut(c.layer));
+            .map(|(child, _)| {
+                old.children
+                    .iter()
+                    .find(|c| c.collection == child.collection && c.source_url == child.source_url)
+                    .or_else(|| {
+                        let unique = read_count(&child.collection) == 1 && old_count(&child.collection) == 1;
+                        old.children.iter().find(|c| unique && c.collection == child.collection)
+                    })
+                    .map(|c| c.layer)
+            })
+            .collect(),
+    };
+    let mut children = Vec::new();
+    for ((mut child, mut dataset), existing) in reads.into_iter().zip(matches) {
+        let existing = existing.and_then(|id| s.map_mut().layer_mut(id));
         if let Some(layer) = existing {
             if dataset.geometry_type == rustgis_data::GeometryType::None {
                 dataset.geometry_type = layer.geometry_type();
@@ -244,6 +292,10 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             layer.display_filters.retain(|f| rustgis_data::query::parse(&f.where_, &layer.dataset).is_ok());
             layer.touch_geometry();
             child.layer = layer.id;
+            // Locked labels name rows of the old features.
+            if let Some(lock) = &mut s.map_mut().label_lock {
+                lock.retain(|(id, _)| *id != child.layer);
+            }
         } else {
             child.layer = crate::cmd::layer::add_dataset(s, dataset);
             if hidden && let Some(layer) = s.map_mut().layer_mut(child.layer) {
@@ -253,10 +305,24 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
         children.push(child);
     }
     let ids: Vec<u32> = children.iter().map(|c| c.layer).collect();
+    let map = s.map_mut();
     if child_id.is_none() {
-        s.map_mut().layers.retain(|l| !old.children.iter().any(|c| c.layer == l.id) || ids.contains(&l.id));
-        let group = s.map_mut().service_groups.iter_mut().find(|g| g.id == old.id).ok_or("the group was removed")?;
+        let gone: Vec<u32> = old.children.iter().map(|c| c.layer).filter(|id| !ids.contains(id)).collect();
+        map.layers.retain(|l| !gone.contains(&l.id));
+        if let Some(lock) = &mut map.label_lock {
+            lock.retain(|(id, _)| !gone.contains(id));
+        }
+    }
+    let group = map.service_groups.iter_mut().find(|g| g.id == old.id).ok_or("the group was removed")?;
+    if child_id.is_none() {
         group.children = children;
+    } else {
+        // The child's provenance follows the service (a new source address or token).
+        for new in children {
+            if let Some(c) = group.children.iter_mut().find(|c| c.layer == new.layer) {
+                *c = new;
+            }
+        }
     }
     Ok(json!({"group":old.id,"layers":ids}))
 }

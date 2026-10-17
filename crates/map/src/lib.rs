@@ -696,10 +696,18 @@ impl Map {
         }
     }
 
+    /// A nonzero id no layer or service group has: past the highest in use, or (when ids reach
+    /// `u32::MAX`, as a project file may have them) the lowest free one.
     fn next_id(&mut self) -> u32 {
-        let id = self
-            .next_layer_id
-            .max(self.layers.iter().map(|l| l.id).chain(self.service_groups.iter().map(|g| g.id)).max().unwrap_or(0).saturating_add(1));
+        let used = || self.layers.iter().map(|l| l.id).chain(self.service_groups.iter().map(|g| g.id));
+        let preferred = self.next_layer_id.max(used().max().unwrap_or(0).saturating_add(1));
+        let id = if preferred != 0 && !used().any(|id| id == preferred) {
+            preferred
+        } else {
+            let taken: std::collections::HashSet<u32> = used().collect();
+            // Among the first `taken.len() + 1` nonzero ids one is free.
+            (1..=u32::MAX).take(taken.len().saturating_add(1)).find(|id| !taken.contains(id)).unwrap_or(1)
+        };
         self.next_layer_id = id.saturating_add(1);
         id
     }
@@ -1007,6 +1015,19 @@ mod tests {
         let run = (0..n).map(|i| Coord::new(-170.0 + 340.0 * i as f64 / n as f64, 0.0)).collect();
         d.push(Some(Geometry::Line(vec![run])), vec![]);
         Layer::new(1, d)
+    }
+
+    #[test]
+    fn ids_stay_unique_when_a_project_reaches_the_largest_id() {
+        let mut m = Map::new("m");
+        m.layers.push(Layer::new(u32::MAX, points()));
+        let group = ServiceGroup { id: 0, name: "g".into(), url: String::new(), kind: String::new(), expanded: true, children: vec![] };
+        let a = m.add_dataset(points());
+        let b = m.add_service_group(group);
+        let c = m.add_dataset(points());
+        let ids = [u32::MAX, a, b, c];
+        assert!(ids.iter().all(|&id| id != 0));
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), ids.len(), "{ids:?}");
     }
 
     #[test]

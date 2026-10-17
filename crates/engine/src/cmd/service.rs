@@ -57,6 +57,8 @@ struct Discovery {
     next: Option<String>,
     error: Option<String>,
     excluded_layers: bool,
+    /// A document left collections out (past its listing limit, or unreadable items links).
+    incomplete: bool,
 }
 
 impl Discovery {
@@ -119,6 +121,7 @@ fn capabilities(p: &Value) -> Result<Discovery, String> {
         let service = match parsed {
             Ok(s) => {
                 let before = s.layers.len();
+                result.incomplete |= s.incomplete;
                 let vetted = vet(s, &address);
                 result.excluded_layers |= vetted.layers.len() != before;
                 vetted
